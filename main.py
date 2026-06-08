@@ -88,11 +88,7 @@ def extract_image(entry):
         logger.warning(f"Could not fetch og:image for {entry.link}: {e}")
     return None
 
-# ---------- стоп-слова (дополнительно) ----------
-STOP_WORDS = {'новости', 'ru-ru', 'rss', 'прайм', 'москва', 'россия сегодня', 'internet-group', 'риа новости',
-              'фгуп', 'миа', 'россия', 'сша', 'иран', 'кндр', 'китай', 'рынок', 'бизнес', 'золото', 'нефть',
-              'газ', 'банк', 'кредит', 'финансы', 'акции', 'индекс', 'доллар', 'рубль', 'юань', 'евро'}
-
+# ---------- проверка мусорной строки (ВОЗВРАЩЕНА проверка на знаки препинания) ----------
 def is_garbage_line(line):
     line = line.strip()
     if not line:
@@ -126,27 +122,27 @@ def is_garbage_line(line):
     if re.match(r'https?://\S+', line):
         return True
 
-    # строки, начинающиеся с тире
-    if line.startswith('—'):
+    # обрывки цитат: начинается с тире или дефиса
+    if line.startswith('—') or line.startswith('- '):
         return True
 
-    # строка из 1-3 коротких слов (теги)
-    words = line.split()
-    if 1 <= len(words) <= 3 and all(len(w) < 20 for w in words):
-        # если все слова не начинаются с цифры и есть в стоп-словах, или просто нет глаголов
-        if not any(w[0].isdigit() for w in words):
-            # если все слова являются именами собственными или из стоп-листа
-            if all(w.lower() in STOP_WORDS or (w[0].isupper() and len(w) > 1) for w in words):
-                return True
-            # если нет глагольных окончаний, считаем тегами
-            if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают', 'ил', 'ел', 'ет', 'ит', 'ут', 'ют')) for w in words):
-                return True
+    # обрывки: начинается со знака препинания (запятая, точка, двоеточие и т.д.)
+    if line and line[0] in ',.;:!?':
+        return True
 
-    # строка с запятыми – если >=2 запятых, все части <25 символов и нет глаголов
+    # теги через запятую (ключевые слова) – если >=2 запятых, все части <25 символов и нет глаголов
     parts = [p.strip() for p in line.split(',') if p.strip()]
     if len(parts) >= 2 and all(len(w) < 25 for w in parts):
-        if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают', 'ил', 'ел', 'ет', 'ит')) for w in parts):
+        if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают', 'ил', 'ел', 'ет', 'ит', 'ут', 'ют')) for w in parts):
             return True
+
+    # короткие строки из 1-3 слов без глаголов (теги)
+    words = line.split()
+    if 1 <= len(words) <= 3 and all(len(w) < 20 for w in words):
+        if not any(w[0].isdigit() for w in words):
+            # если нет глагольных окончаний – удаляем
+            if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают', 'ил', 'ел', 'ет', 'ит', 'ут', 'ют')) for w in words):
+                return True
 
     return False
 
@@ -160,6 +156,7 @@ def clean_text(raw_text, title=""):
             continue
         if is_garbage_line(line):
             continue
+        # обрывок: начинается с маленькой буквы после завершённого предложения
         if line and line[0].islower() and prev_ended:
             continue
         if title and line.lower() == title.lower():
@@ -168,12 +165,11 @@ def clean_text(raw_text, title=""):
         prev_ended = line.endswith(('.', '!', '?'))
     return "\n".join(cleaned)
 
+# ---------- фильтрация тела: оставляем только содержательные строки ----------
 def has_verb(line):
-    """Проверяет, содержит ли строка русский глагол (очень грубо)."""
     return any(w.endswith(('ет', 'ит', 'ут', 'ют', 'ал', 'ил', 'ел', 'ть', 'чь', 'ся', 'сь', 'ете', 'ают', 'яют', 'ует', 'ирует')) for w in line.split())
 
 def filter_body_lines(text):
-    """Оставляет только содержательные строки: с глаголом, длинные или прямую речь."""
     lines = text.splitlines()
     result = []
     for line in lines:
@@ -186,9 +182,9 @@ def filter_body_lines(text):
             result.append(line)
         elif line.startswith('"') or line.startswith('«'):
             result.append(line)
-        # иначе пропускаем
     return "\n".join(result)
 
+# ---------- извлечение статьи ----------
 def extract_article_text(url, fallback_description=""):
     try:
         resp = scraper.get(url, timeout=15)
@@ -209,6 +205,7 @@ def extract_article_text(url, fallback_description=""):
         return fallback_description.strip()[:9000]
     return None
 
+# ---------- эмодзи ----------
 def add_emoji_prefix(text):
     lower = text.lower()
     if any(w in lower for w in ['акци', 'биржа', 'индекс', 'торг', 's&p', 'nasdaq', 'инвест']):
@@ -223,6 +220,7 @@ def add_emoji_prefix(text):
         return "💵 " + text
     return "🔹 " + text
 
+# ---------- отправка в Telegram ----------
 def send_telegram_post(text, image_url):
     base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     if image_url:
@@ -244,6 +242,7 @@ def send_telegram_post(text, image_url):
         logger.error(f"Telegram send error: {e}")
         return False
 
+# ---------- умное обрезание ----------
 def trim_text(text, max_len=900):
     if len(text) <= max_len:
         return text
@@ -255,6 +254,7 @@ def trim_text(text, max_len=900):
     last_space = cut.rfind(' ')
     return cut[:last_space] + "…" if last_space > 0 else cut + "…"
 
+# ---------- главный цикл ----------
 def main():
     logger.info("=== Запуск бота ===")
     posted = load_posted_guids()
@@ -302,10 +302,10 @@ def main():
             if new_title:
                 title = new_title
 
-        # убираем из тела дубликаты заголовка (и старого, и нового)
+        # удаляем из тела дубликаты заголовка
         cleaned_text = "\n".join([l for l in cleaned_text.splitlines() if l.lower() not in (original_title.lower(), title.lower())])
 
-        # агрессивная фильтрация тела – только содержательные строки
+        # фильтрация тела – только важные строки
         body = filter_body_lines(cleaned_text)
         body = trim_text(body, 800) if body else ""
 

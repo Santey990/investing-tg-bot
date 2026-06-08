@@ -145,7 +145,7 @@ def extract_article_text(url, fallback_description=""):
     return None
 
 def ai_rewrite(original_text, image_url=None):
-    client = genai.Client(api_key=GEMINI_API_KEY, api_version='v1')
+    client = genai.Client(api_key=GEMINI_API_KEY)
     prompt = (
         "Ты — редактор телеграм-канала об инвестициях и финансах.\n"
         "Перепиши новость в яркий и лаконичный пост для Telegram.\n"
@@ -159,7 +159,7 @@ def ai_rewrite(original_text, image_url=None):
     )
     try:
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-1.5-pro",
             contents=prompt,
         )
         if response.text:

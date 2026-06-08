@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 from readability import Document
 from google import genai
 
-RSS_URL = "https://ru.investing.com/rss/news.rss"
+RSS_URL = "https://1prime.ru/export/rss2/index.xml"          # <-- заменён
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
@@ -25,7 +25,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
-# Cloudscraper для обхода Cloudflare
 scraper = cloudscraper.create_scraper()
 
 def load_posted_guids():
@@ -91,10 +90,7 @@ def extract_image(entry):
     return None
 
 def extract_article_text(url, fallback_description=""):
-    """
-    Сначала пробуем получить полный текст через cloudscraper (обходит Cloudflare).
-    При неудаче берём описание из RSS.
-    """
+    # Сначала пытаемся получить полный текст через cloudscraper
     try:
         resp = scraper.get(url, timeout=15)
         resp.raise_for_status()
@@ -107,11 +103,11 @@ def extract_article_text(url, fallback_description=""):
             logger.info("Полный текст получен через cloudscraper.")
             return text[:4000]
     except Exception as e:
-        logger.warning(f"Ошибка cloudscraper/text extraction: {e}")
+        logger.warning(f"Cloudscraper error for {url}: {e}")
 
-    # Fallback – берём краткое описание из ленты
-    if fallback_description and len(fallback_description.strip()) > 50:
-        logger.info("Используем описание из RSS как резервный текст.")
+    # Если полный текст не получен – берём описание из RSS
+    if fallback_description and len(fallback_description.strip()) > 30:
+        logger.info("Используем описание из RSS.")
         return fallback_description.strip()[:4000]
 
     logger.warning("Нет ни полного текста, ни описания.")
@@ -200,11 +196,10 @@ def main():
         description = entry.get("description", "")
         full_text = extract_article_text(entry.link, fallback_description=description)
 
+        # Если вообще нет текста – используем заголовок как основу для Gemini
         if not full_text:
-            logger.warning(f"Пропускаю {entry.link} – совсем нет текста.")
-            posted.add(guid)
-            posted_changed = True
-            continue
+            logger.warning(f"Для {entry.link} нет текста. Использую только заголовок.")
+            full_text = entry.title
 
         edited = ai_rewrite(full_text, image_url)
         if not edited:

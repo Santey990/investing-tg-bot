@@ -92,7 +92,6 @@ def extract_image(entry):
 
 # ---------- проверка мусорной строки ----------
 def is_garbage_line(line):
-    """True, если строка – теги, даты, контакты, обрывки."""
     line = line.strip()
     if not line:
         return True
@@ -116,10 +115,8 @@ def is_garbage_line(line):
         return True
     if re.fullmatch(r'\d{2}\.\d{2}\.\d{4}', line):
         return True
-    # Год отдельно (20xx)
     if re.fullmatch(r'20\d{2}', line):
         return True
-    # Четырёхзначное число (если строка только из него)
     if re.fullmatch(r'\d{4}', line):
         return True
 
@@ -127,17 +124,16 @@ def is_garbage_line(line):
     if re.match(r'https?://\S+', line):
         return True
 
-    # Теги через запятую (ключевые слова) – теперь лимит 35 символов на слово
+    # Теги через запятую (ключевые слова) – с проверкой на отсутствие глаголов
     parts = [p.strip() for p in line.split(',') if p.strip()]
     if len(parts) >= 2 and all(len(w) < 35 for w in parts):
-        # Дополнительно: если нет ни одного глагольного окончания, считаем тегами
         if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают')) for w in parts):
             return True
 
     # Одиночные короткие слова-теги (1-3 слова, без глаголов)
     words = line.split()
     if 1 <= len(words) <= 3 and all(len(w) < 20 for w in words):
-        if not any(w[0].isdigit() for w in words):  # не числа
+        if not any(w[0].isdigit() for w in words):
             return True
 
     # Строки, начинающиеся со знака препинания (обрывки)
@@ -147,30 +143,21 @@ def is_garbage_line(line):
     return False
 
 def clean_text(raw_text, title=""):
-    """Основная очистка."""
     lines = raw_text.splitlines()
     cleaned = []
-    prev_ended = True  # предыдущая строка завершала предложение
-    
+    prev_ended = True
     for line in lines:
         line = line.strip()
         if not line:
             continue
-
         if is_garbage_line(line):
             continue
-
-        # Удаление обрывков: начинается с маленькой буквы после завершённого предложения
         if line and line[0].islower() and prev_ended:
             continue
-
-        # Повтор заголовка
         if title and line.lower() == title.lower():
             continue
-
         cleaned.append(line)
         prev_ended = line.endswith(('.', '!', '?'))
-
     return "\n".join(cleaned)
 
 # ---------- извлечение статьи ----------
@@ -194,15 +181,12 @@ def extract_article_text(url, fallback_description=""):
         return fallback_description.strip()[:9000]
     return None
 
-# ---------- эмодзи по тематике ----------
+# ---------- эмодзи ----------
 def add_emoji_prefix(text):
-    """Добавляет эмодзи к тексту, убрав возможные оставшиеся годы в начале."""
-    # Сначала удалим ведущие строки, которые выглядят как год (20xx) или просто цифры
     lines = text.splitlines()
     while lines and re.fullmatch(r'20\d{2}', lines[0].strip()):
         lines.pop(0)
     text = "\n".join(lines).strip()
-    
     lower = text.lower()
     if any(w in lower for w in ['акци', 'биржа', 'индекс', 'торг', 's&p', 'nasdaq', 'инвест']):
         return "📈 " + text
@@ -231,7 +215,7 @@ def ai_rewrite(original_text, image_url=None):
             f"Исходная статья:\n{original_text}"
         )
         response = client.models.generate_content(
-            model="gemini-1.5-flash",   # самая надёжная бесплатная модель
+            model="models/gemini-1.5-flash",   # полный путь
             contents=prompt,
         )
         if response.text:
@@ -321,20 +305,33 @@ def main():
         if not cleaned_text:
             cleaned_text = title
 
-        # Попробовать ИИ-рерайт
+        # Если оригинальный title был мусором, выберем новый заголовок из текста
+        if is_garbage_line(title):
+            lines = cleaned_text.splitlines()
+            # Ищем первую строку, которая не является мусором и не начинается с маленькой буквы
+            new_title = ""
+            for line in lines:
+                if line and not is_garbage_line(line) and line[0].isupper():
+                    new_title = line
+                    break
+            if new_title:
+                title = new_title
+                # Удаляем эту строку из cleaned_text, чтобы она не повторялась
+                cleaned_text = "\n".join(lines[1:]).strip() if len(lines) > 1 else ""
+                if not cleaned_text:
+                    cleaned_text = title
+
+        # Попытка ИИ-рерайта
         edited = ai_rewrite(cleaned_text, image_url)
 
         if not edited:
-            # Fallback – очищенный текст с эмодзи и обрезанием
-            fallback = cleaned_text
-            # Убираем возможные оставшиеся теги, которые проскочили (повторная очистка)
-            fallback = clean_text(fallback, title="")  # без сравнения с заголовком
-            edited = trim_text(fallback, 900)
-            edited = add_emoji_prefix(edited)
-            if "@Investing_24" not in edited:
-                edited += "\n\nПодпишись на канал @Investing_24"
+            # Fallback – формируем пост с заголовком
+            body = trim_text(cleaned_text, 800) if cleaned_text else ""
+            final_post = add_emoji_prefix(title) + "\n\n" + body if body else add_emoji_prefix(title)
+            if "@Investing_24" not in final_post:
+                final_post += "\n\nПодпишись на канал @Investing_24"
+            edited = final_post
         else:
-            # Gemini сработал – проверяем длину
             if len(edited) > 1024:
                 edited = trim_text(edited, 900)
 

@@ -88,7 +88,7 @@ def extract_image(entry):
         logger.warning(f"Could not fetch og:image for {entry.link}: {e}")
     return None
 
-# ---------- проверка мусорной строки ----------
+# ---------- мусорная строка (улучшена) ----------
 def is_garbage_line(line):
     line = line.strip()
     if not line:
@@ -122,10 +122,9 @@ def is_garbage_line(line):
     if re.match(r'https?://\S+', line):
         return True
 
-    # обрывки цитат: начинается с тире или дефиса
+    # обрывки цитат
     if line.startswith('—') or line.startswith('- '):
         return True
-
     # обрывки: начинается со знака препинания
     if line and line[0] in ',.;:!?':
         return True
@@ -136,7 +135,7 @@ def is_garbage_line(line):
         if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают', 'ил', 'ел', 'ет', 'ит', 'ут', 'ют')) for w in parts):
             return True
 
-    # короткие строки из 1-3 слов без глаголов (теги)
+    # короткие строки из 1-3 слов без глаголов (одиночные теги)
     words = line.split()
     if 1 <= len(words) <= 3 and all(len(w) < 20 for w in words):
         if not any(w[0].isdigit() for w in words):
@@ -163,7 +162,7 @@ def clean_text(raw_text, title=""):
         prev_ended = line.endswith(('.', '!', '?'))
     return "\n".join(cleaned)
 
-# ---------- фильтрация тела (ослабленная) ----------
+# ---------- фильтрация тела: только хорошие строки (добавлен вызов is_garbage_line) ----------
 def has_verb(line):
     return any(w.endswith(('ет', 'ит', 'ут', 'ют', 'ал', 'ил', 'ел', 'ть', 'чь', 'ся', 'сь', 'ете', 'ают', 'яют', 'ует', 'ирует')) for w in line.split())
 
@@ -172,13 +171,9 @@ def filter_body_lines(text):
     result = []
     for line in lines:
         line = line.strip()
-        if not line:
+        if not line or is_garbage_line(line):
             continue
-        if len(line) > 60:          # снижено с 100 для сохранения текста
-            result.append(line)
-        elif has_verb(line):
-            result.append(line)
-        elif line.startswith('"') or line.startswith('«'):
+        if len(line) > 60 or has_verb(line) or line.startswith('"') or line.startswith('«'):
             result.append(line)
     return "\n".join(result)
 
@@ -281,12 +276,12 @@ def main():
         if not raw_text:
             raw_text = original_title
 
-        # первичная очистка
+        # первичная очистка с исходным заголовком
         cleaned_text = clean_text(raw_text, title=original_title)
         if not cleaned_text:
             cleaned_text = original_title
 
-        # если заголовок мусорный – ищем новый в теле
+        # если заголовок мусорный – ищем нормальный в теле
         title = original_title
         if is_garbage_line(title):
             lines = cleaned_text.splitlines()
@@ -300,7 +295,7 @@ def main():
             if new_title:
                 title = new_title
 
-        # удаляем из тела строки, начинающиеся с любого из заголовков
+        # удаляем строки, начинающиеся с любого из заголовков (дубликаты)
         cleaned_lines = cleaned_text.splitlines()
         filtered = []
         for line in cleaned_lines:
@@ -311,7 +306,7 @@ def main():
             filtered.append(line)
         cleaned_text = "\n".join(filtered)
 
-        # фильтрация тела – только важные строки
+        # фильтруем тело – теперь is_garbage_line работает внутри
         body = filter_body_lines(cleaned_text)
         body = trim_text(body, 800) if body else ""
 

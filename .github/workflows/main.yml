@@ -9,7 +9,7 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write    # больше не нужно для push, но оставим для checkout
 
     steps:
       - uses: actions/checkout@v4
@@ -21,7 +21,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Debug secrets (safely shows length only)
+      - name: Debug secrets (length only)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
@@ -30,6 +30,21 @@ jobs:
           if [ -z "$TELEGRAM_BOT_TOKEN" ]; then echo "TELEGRAM_BOT_TOKEN is empty!"; else echo "TELEGRAM_BOT_TOKEN length: ${#TELEGRAM_BOT_TOKEN}"; fi
           if [ -z "$TELEGRAM_CHANNEL_ID" ]; then echo "TELEGRAM_CHANNEL_ID is empty!"; else echo "TELEGRAM_CHANNEL_ID length: ${#TELEGRAM_CHANNEL_ID}"; fi
           if [ -z "$GEMINI_API_KEY" ]; then echo "GEMINI_API_KEY is empty!"; else echo "GEMINI_API_KEY length: ${#GEMINI_API_KEY}"; fi
+
+      # --- КЭШ: восстановление списка обработанных GUID ---
+      - name: Restore posted guids cache
+        id: cache-guid
+        uses: actions/cache@v4
+        with:
+          path: posted_guids.json
+          key: posted-guids-${{ runner.os }}
+
+      # Если кэша нет, создаём пустой файл (на случай первого запуска)
+      - name: Init posted_guids.json if missing
+        run: |
+          if [ ! -f posted_guids.json ]; then
+            echo '[]' > posted_guids.json
+          fi
 
       - name: Run bot
         env:
@@ -42,16 +57,11 @@ jobs:
         if: always()
         run: cat bot.log
 
-      - name: Commit and push if posted_guids.json changed
+      # --- КЭШ: сохранение обновлённого списка GUID ---
+      - name: Save posted guids cache
         if: success()
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add posted_guids.json
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "Update posted guids [skip ci]"
-            git pull --rebase origin main || (echo "Rebase failed, skipping push"; exit 0)
-            git push
-          fi
+        uses: actions/cache@v4
+        with:
+          path: posted_guids.json
+          key: posted-guids-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: posted-guids-${{ runner.os }}

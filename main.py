@@ -1,13 +1,11 @@
-import os
-import json
-import time
-import logging
+import os, json, time, logging, sys
 import feedparser
 import requests
 from bs4 import BeautifulSoup
 from readability import Document
 from google import genai
 
+# Настройки
 RSS_URL = "https://ru.investing.com/rss/news.rss"
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
@@ -17,10 +15,14 @@ DATA_FILE = "posted_guids.json"
 MAX_ITEMS_PER_RUN = 5
 LOG_FILE = "bot.log"
 
+# Логгирование: и в файл, и в консоль (stdout)
 logging.basicConfig(
-    filename=LOG_FILE,
     level=logging.INFO,
     format="%(asctime)s %(levelname)s: %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger()
 
@@ -43,10 +45,28 @@ def save_posted_guids(guids):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(list(guids), f)
 
+def fetch_rss(url):
+    """Скачиваем RSS с браузерным User-Agent, чтобы не банили."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        return resp.content
+    except Exception as e:
+        logger.error(f"Failed to download RSS: {e}")
+        return None
+
 def get_feed_entries():
-    feed = feedparser.parse(RSS_URL)
+    content = fetch_rss(RSS_URL)
+    if content is None:
+        logger.error("No RSS content retrieved.")
+        return []
+    feed = feedparser.parse(content)
     if feed.bozo:
         logger.error(f"RSS parse error: {feed.bozo_exception}")
+    logger.info(f"RSS feed contains {len(feed.entries)} items.")
     return feed.entries
 
 def extract_image(entry):
@@ -148,8 +168,11 @@ def main():
     logger.info("=== Starting bot run ===")
     posted = load_posted_guids()
     entries = get_feed_entries()
-    logger.info(f"Found {len(entries)} entries in RSS. Already posted: {len(posted)}")
+    if not entries:
+        logger.warning("No entries found in feed. Exiting.")
+        return
 
+    logger.info(f"Found {len(entries)} items total, {len(posted)} already posted.")
     new_items = 0
     for entry in entries:
         guid = entry.get("id") or entry.link

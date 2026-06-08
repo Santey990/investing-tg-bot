@@ -25,7 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
-# Инициализация cloudscraper (обходит защиту)
+# Cloudscraper для обхода Cloudflare
 scraper = cloudscraper.create_scraper()
 
 def load_posted_guids():
@@ -92,11 +92,10 @@ def extract_image(entry):
 
 def extract_article_text(url, fallback_description=""):
     """
-    Пытается получить полный текст через cloudscraper.
-    Если не удаётся – возвращает fallback_description (краткое описание из RSS).
+    Сначала пробуем получить полный текст через cloudscraper (обходит Cloudflare).
+    При неудаче берём описание из RSS.
     """
     try:
-        # Используем cloudscraper для обхода защиты
         resp = scraper.get(url, timeout=15)
         resp.raise_for_status()
         doc = Document(resp.text)
@@ -105,17 +104,17 @@ def extract_article_text(url, fallback_description=""):
             tag.decompose()
         text = soup.get_text(separator="\n", strip=True)
         if len(text) > 200:
-            logger.info("Full article extracted via cloudscraper.")
+            logger.info("Полный текст получен через cloudscraper.")
             return text[:4000]
     except Exception as e:
-        logger.warning(f"Cloudscraper/article extraction failed: {e}")
+        logger.warning(f"Ошибка cloudscraper/text extraction: {e}")
 
-    # Fallback – используем описание из RSS
+    # Fallback – берём краткое описание из ленты
     if fallback_description and len(fallback_description.strip()) > 50:
-        logger.info("Using RSS description as fallback text.")
+        logger.info("Используем описание из RSS как резервный текст.")
         return fallback_description.strip()[:4000]
 
-    logger.warning("No fallback description available.")
+    logger.warning("Нет ни полного текста, ни описания.")
     return None
 
 def ai_rewrite(original_text, image_url=None):
@@ -139,10 +138,10 @@ def ai_rewrite(original_text, image_url=None):
         if response.text:
             return response.text.strip()
         else:
-            logger.error("Gemini returned empty response.")
+            logger.error("Gemini вернул пустой ответ.")
             return None
     except Exception as e:
-        logger.error(f"Gemini API error: {e}")
+        logger.error(f"Ошибка Gemini API: {e}")
         return None
 
 def send_telegram_post(text, image_url):
@@ -170,21 +169,21 @@ def send_telegram_post(text, image_url):
         if not result.get("ok"):
             logger.error(f"Telegram API error: {result}")
             return False
-        logger.info("Post sent successfully.")
+        logger.info("Пост успешно отправлен.")
         return True
     except Exception as e:
         logger.error(f"Telegram send error: {e}")
         return False
 
 def main():
-    logger.info("=== Starting bot run ===")
+    logger.info("=== Запуск бота ===")
     posted = load_posted_guids()
     entries = get_feed_entries()
     if not entries:
-        logger.warning("No entries found in feed. Exiting.")
+        logger.warning("Новостей в ленте нет. Выход.")
         return
 
-    logger.info(f"Found {len(entries)} items total, {len(posted)} already posted.")
+    logger.info(f"Найдено {len(entries)} записей, обработано ранее: {len(posted)}.")
     new_items = 0
     posted_changed = False
 
@@ -195,18 +194,14 @@ def main():
         if new_items >= MAX_ITEMS_PER_RUN:
             break
 
-        logger.info(f"Processing new item: {entry.title}")
+        logger.info(f"Обрабатываю: {entry.title}")
 
-        # Получаем картинку
         image_url = extract_image(entry)
-
-        # Пробуем получить полный текст; если не выйдет – используем description из RSS
         description = entry.get("description", "")
         full_text = extract_article_text(entry.link, fallback_description=description)
 
         if not full_text:
-            logger.warning(f"Skipping {entry.link} – no text available at all.")
-            # Всё равно помечаем как обработанный, чтобы не зацикливаться
+            logger.warning(f"Пропускаю {entry.link} – совсем нет текста.")
             posted.add(guid)
             posted_changed = True
             continue
@@ -222,13 +217,13 @@ def main():
             posted_changed = True
             time.sleep(2)
         else:
-            logger.error(f"Failed to send post for {entry.link}")
+            logger.error(f"Не удалось отправить пост для {entry.link}")
 
     if posted_changed:
         save_posted_guids(posted)
-        logger.info(f"Saved {len(posted)} GUIDs (added {new_items} new).")
+        logger.info(f"Сохранено GUID: добавлено {new_items} новых.")
     else:
-        logger.info("No new items to post.")
+        logger.info("Новых записей нет.")
 
 if __name__ == "__main__":
     main()

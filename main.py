@@ -1,6 +1,7 @@
 import os, json, time, logging, sys
 import feedparser
 import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 from readability import Document
 from google import genai
@@ -24,6 +25,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
+# Инициализация cloudscraper (обходит защиту)
+scraper = cloudscraper.create_scraper()
+
 def load_posted_guids():
     if not os.path.exists(DATA_FILE):
         return set()
@@ -45,7 +49,7 @@ def save_posted_guids(guids):
 
 def fetch_rss(url):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
     try:
         resp = requests.get(url, headers=headers, timeout=20)
@@ -86,32 +90,32 @@ def extract_image(entry):
         logger.warning(f"Could not fetch og:image for {entry.link}: {e}")
     return None
 
-def extract_article_text(url):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Referer": "https://ru.investing.com/",
-        "DNT": "1",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-    }
-    for attempt in range(3):
-        try:
-            resp = requests.get(url, headers=headers, timeout=15)
-            resp.raise_for_status()
-            doc = Document(resp.text)
-            soup = BeautifulSoup(doc.summary(), "html.parser")
-            for tag in soup(["script", "style", "img", "figure", "figcaption"]):
-                tag.decompose()
-            text = soup.get_text(separator="\n", strip=True)
+def extract_article_text(url, fallback_description=""):
+    """
+    Пытается получить полный текст через cloudscraper.
+    Если не удаётся – возвращает fallback_description (краткое описание из RSS).
+    """
+    try:
+        # Используем cloudscraper для обхода защиты
+        resp = scraper.get(url, timeout=15)
+        resp.raise_for_status()
+        doc = Document(resp.text)
+        soup = BeautifulSoup(doc.summary(), "html.parser")
+        for tag in soup(["script", "style", "img", "figure", "figcaption"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n", strip=True)
+        if len(text) > 200:
+            logger.info("Full article extracted via cloudscraper.")
             return text[:4000]
-        except requests.exceptions.HTTPError as e:
-            logger.warning(f"Attempt {attempt+1} failed for {url}: {e}")
-            time.sleep(2)
-        except Exception as e:
-            logger.error(f"Article extraction error on {url}: {e}")
-            break
+    except Exception as e:
+        logger.warning(f"Cloudscraper/article extraction failed: {e}")
+
+    # Fallback – используем описание из RSS
+    if fallback_description and len(fallback_description.strip()) > 50:
+        logger.info("Using RSS description as fallback text.")
+        return fallback_description.strip()[:4000]
+
+    logger.warning("No fallback description available.")
     return None
 
 def ai_rewrite(original_text, image_url=None):
@@ -182,6 +186,8 @@ def main():
 
     logger.info(f"Found {len(entries)} items total, {len(posted)} already posted.")
     new_items = 0
+    posted_changed = False
+
     for entry in entries:
         guid = entry.get("id") or entry.link
         if guid in posted:
@@ -190,11 +196,19 @@ def main():
             break
 
         logger.info(f"Processing new item: {entry.title}")
+
+        # Получаем картинку
         image_url = extract_image(entry)
-        full_text = extract_article_text(entry.link)
+
+        # Пробуем получить полный текст; если не выйдет – используем description из RSS
+        description = entry.get("description", "")
+        full_text = extract_article_text(entry.link, fallback_description=description)
+
         if not full_text:
-            logger.warning(f"Skipping {entry.link} – no text extracted.")
+            logger.warning(f"Skipping {entry.link} – no text available at all.")
+            # Всё равно помечаем как обработанный, чтобы не зацикливаться
             posted.add(guid)
+            posted_changed = True
             continue
 
         edited = ai_rewrite(full_text, image_url)
@@ -205,13 +219,14 @@ def main():
         if success:
             posted.add(guid)
             new_items += 1
+            posted_changed = True
             time.sleep(2)
         else:
             logger.error(f"Failed to send post for {entry.link}")
 
-    if new_items > 0:
+    if posted_changed:
         save_posted_guids(posted)
-        logger.info(f"Saved {new_items} new GUIDs.")
+        logger.info(f"Saved {len(posted)} GUIDs (added {new_items} new).")
     else:
         logger.info("No new items to post.")
 

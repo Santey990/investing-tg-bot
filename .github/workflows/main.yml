@@ -2,7 +2,7 @@ name: Auto-Investing-Bot
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/2 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -52,7 +52,6 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "Update posted guids [skip ci]"
-            # Автоматически принимаем нашу версию при конфликтах
-            git pull --rebase -X ours origin main || (echo "Rebase failed, force push not needed"; exit 0)
+            git pull --rebase -X ours origin main || (echo "Rebase failed, skipping push"; exit 0)
             git push
           fi

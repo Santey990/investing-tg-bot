@@ -1,4 +1,4 @@
-import os, json, time, logging, sys
+import os, json, time, logging, sys, re
 import feedparser
 import requests
 import cloudscraper
@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 from readability import Document
 from google import genai
 
-RSS_URL = "https://1prime.ru/export/rss2/index.xml"          # <-- заменён
+RSS_URL = "https://1prime.ru/export/rss2/index.xml"
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
@@ -89,8 +89,40 @@ def extract_image(entry):
         logger.warning(f"Could not fetch og:image for {entry.link}: {e}")
     return None
 
+def clean_text(raw_text, title=""):
+    """
+    Удаляем URL, даты, время, строки с 'ПРАЙМ', повторы заголовка и прочий мусор.
+    """
+    lines = raw_text.splitlines()
+    cleaned = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        # Удалить URL
+        if re.match(r'https?://\S+', line):
+            continue
+        # Удалить строки с датой типа "08.06.2026, ПРАЙМ" или "2026-06-08T16:45+0300"
+        if re.search(r'\d{2}\.\d{2}\.\d{4}', line) and ('ПРАЙМ' in line or 'PRIME' in line.upper()):
+            continue
+        if re.match(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{4}', line):
+            continue
+        # Удалить строки, состоящие только из даты и времени
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{4}', line):
+            continue
+        # Удалить строки, которые являются повторением заголовка (полное совпадение)
+        if title and line.lower() == title.lower():
+            continue
+        # Удалить строки, состоящие только из названия источника "ПРАЙМ"
+        if line.upper() in ["ПРАЙМ", "PRIME"]:
+            continue
+        # Если строка содержит только дату в формате "08.06.2026"
+        if re.fullmatch(r'\d{2}\.\d{2}\.\d{4}', line):
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned)
+
 def extract_article_text(url, fallback_description=""):
-    # Сначала пытаемся получить полный текст через cloudscraper
     try:
         resp = scraper.get(url, timeout=15)
         resp.raise_for_status()
@@ -105,7 +137,6 @@ def extract_article_text(url, fallback_description=""):
     except Exception as e:
         logger.warning(f"Cloudscraper error for {url}: {e}")
 
-    # Если полный текст не получен – берём описание из RSS
     if fallback_description and len(fallback_description.strip()) > 30:
         logger.info("Используем описание из RSS.")
         return fallback_description.strip()[:4000]
@@ -114,7 +145,7 @@ def extract_article_text(url, fallback_description=""):
     return None
 
 def ai_rewrite(original_text, image_url=None):
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY, api_version='v1')
     prompt = (
         "Ты — редактор телеграм-канала об инвестициях и финансах.\n"
         "Перепиши новость в яркий и лаконичный пост для Telegram.\n"
@@ -128,7 +159,7 @@ def ai_rewrite(original_text, image_url=None):
     )
     try:
         response = client.models.generate_content(
-            model="gemini-2.0-flash-exp",   # ← ЗДЕСЬ МЕНЯЕМ МОДЕЛЬ
+            model="gemini-1.5-flash",
             contents=prompt,
         )
         if response.text:
@@ -190,20 +221,25 @@ def main():
         if new_items >= MAX_ITEMS_PER_RUN:
             break
 
-        logger.info(f"Обрабатываю: {entry.title}")
+        title = entry.get("title", "")
+        logger.info(f"Обрабатываю: {title}")
 
         image_url = extract_image(entry)
         description = entry.get("description", "")
-        full_text = extract_article_text(entry.link, fallback_description=description)
+        raw_text = extract_article_text(entry.link, fallback_description=description)
 
-        # Если вообще нет текста – используем заголовок как основу для Gemini
-        if not full_text:
-            logger.warning(f"Для {entry.link} нет текста. Использую только заголовок.")
-            full_text = entry.title
+        if not raw_text:
+            raw_text = title
 
-        edited = ai_rewrite(full_text, image_url)
+        # Очищаем текст от мусора перед отправкой
+        cleaned_text = clean_text(raw_text, title=title)
+        if not cleaned_text:
+            cleaned_text = title
+
+        edited = ai_rewrite(cleaned_text, image_url)
         if not edited:
-            edited = entry.title + "\n\n" + full_text[:500] + "..."
+            # Если Gemini не ответил, используем очищенный текст как fallback
+            edited = title + "\n\n" + cleaned_text[:500] + "..."
 
         success = send_telegram_post(edited, image_url)
         if success:

@@ -27,7 +27,7 @@ logger = logging.getLogger()
 
 scraper = cloudscraper.create_scraper()
 
-# ---------- работа с GUID ----------
+# ---------- GUID ----------
 def load_posted_guids():
     if not os.path.exists(DATA_FILE):
         return set()
@@ -90,70 +90,78 @@ def extract_image(entry):
         logger.warning(f"Could not fetch og:image for {entry.link}: {e}")
     return None
 
-# ---------- проверка на мусорные строки ----------
+# ---------- проверка мусорной строки ----------
 def is_garbage_line(line):
-    """True, если строка является тегами, обрывком или метаинформацией."""
+    """True, если строка – теги, даты, контакты, обрывки."""
     line = line.strip()
     if not line:
         return True
 
-    # Строки с email или телефоном
+    # Email / телефон
     if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', line):
         return True
     if re.search(r'(\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{2,4}[-.\s]?\d{2,4}', line):
         return True
 
-    # Строки с названиями агентств
+    # Агентства
     if re.search(r'ФГУП|МИА|Россия сегодня|internet-group|РИА Новости|ПРАЙМ', line, re.IGNORECASE):
         return True
 
-    # Дата + источник ("МОСКВА, 8 июн - ПРАЙМ")
+    # Дата + источник
     if re.search(r'\d{1,2}\s+\w+|\d{4}', line) and re.search(r'МОСКВА|ПРАЙМ', line, re.IGNORECASE):
         return True
 
-    # Чистые даты
+    # ISO дата / чистая дата
     if re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{4}', line):
         return True
     if re.fullmatch(r'\d{2}\.\d{2}\.\d{4}', line):
+        return True
+    # Год отдельно (20xx)
+    if re.fullmatch(r'20\d{2}', line):
+        return True
+    # Четырёхзначное число (если строка только из него)
+    if re.fullmatch(r'\d{4}', line):
         return True
 
     # URL
     if re.match(r'https?://\S+', line):
         return True
 
-    # Теги через запятую (рынок, бизнес, россия...)
+    # Теги через запятую (ключевые слова) – теперь лимит 35 символов на слово
     parts = [p.strip() for p in line.split(',') if p.strip()]
-    if len(parts) >= 2 and all(len(w) < 20 for w in parts):
-        return True
-
-    # Одиночные короткие слова‑теги (2-3 слова без глаголов)
-    words = line.split()
-    if 1 <= len(words) <= 3 and all(len(w) < 20 for w in words):
-        # Исключаем числа и строки с цифрами (могут быть частью заголовка)
-        if not any(w.isdigit() for w in words):
+    if len(parts) >= 2 and all(len(w) < 35 for w in parts):
+        # Дополнительно: если нет ни одного глагольного окончания, считаем тегами
+        if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают')) for w in parts):
             return True
 
-    # Обрывки, начинающиеся с маленькой буквы (если строка не первая после точки)
-    # Эту логику перенесём в общий цикл очистки, чтобы знать предыдущую строку.
+    # Одиночные короткие слова-теги (1-3 слова, без глаголов)
+    words = line.split()
+    if 1 <= len(words) <= 3 and all(len(w) < 20 for w in words):
+        if not any(w[0].isdigit() for w in words):  # не числа
+            return True
+
+    # Строки, начинающиеся со знака препинания (обрывки)
+    if line and line[0] in ',.;:!?':
+        return True
+
     return False
 
 def clean_text(raw_text, title=""):
-    """Удаляет мусорные строки и обрывки."""
+    """Основная очистка."""
     lines = raw_text.splitlines()
     cleaned = []
-    prev_ended_with_dot = True  # считаем, что до начала текста предложение завершено
+    prev_ended = True  # предыдущая строка завершала предложение
     
     for line in lines:
         line = line.strip()
         if not line:
             continue
 
-        # Сначала проверяем на мусор
         if is_garbage_line(line):
             continue
 
-        # Если строка начинается с маленькой буквы и предыдущая заканчивалась точкой — это обрывок, удаляем
-        if line and line[0].islower() and prev_ended_with_dot:
+        # Удаление обрывков: начинается с маленькой буквы после завершённого предложения
+        if line and line[0].islower() and prev_ended:
             continue
 
         # Повтор заголовка
@@ -161,8 +169,7 @@ def clean_text(raw_text, title=""):
             continue
 
         cleaned.append(line)
-        # Обновляем флаг завершённости предложения
-        prev_ended_with_dot = line.endswith(('.', '!', '?'))
+        prev_ended = line.endswith(('.', '!', '?'))
 
     return "\n".join(cleaned)
 
@@ -185,12 +192,17 @@ def extract_article_text(url, fallback_description=""):
     if fallback_description and len(fallback_description.strip()) > 30:
         logger.info("Используем описание из RSS.")
         return fallback_description.strip()[:9000]
-
     return None
 
-# ---------- эмодзи по ключевым словам ----------
+# ---------- эмодзи по тематике ----------
 def add_emoji_prefix(text):
-    """Добавляет эмодзи в начало, если подходит по тематике."""
+    """Добавляет эмодзи к тексту, убрав возможные оставшиеся годы в начале."""
+    # Сначала удалим ведущие строки, которые выглядят как год (20xx) или просто цифры
+    lines = text.splitlines()
+    while lines and re.fullmatch(r'20\d{2}', lines[0].strip()):
+        lines.pop(0)
+    text = "\n".join(lines).strip()
+    
     lower = text.lower()
     if any(w in lower for w in ['акци', 'биржа', 'индекс', 'торг', 's&p', 'nasdaq', 'инвест']):
         return "📈 " + text
@@ -219,11 +231,11 @@ def ai_rewrite(original_text, image_url=None):
             f"Исходная статья:\n{original_text}"
         )
         response = client.models.generate_content(
-            model="gemini-1.5-pro",   # надёжная модель
+            model="gemini-1.5-flash",   # самая надёжная бесплатная модель
             contents=prompt,
         )
         if response.text:
-            logger.info("Gemini успешно обработал текст.")
+            logger.info("Gemini успешно переписал текст.")
             return response.text.strip()
         else:
             logger.error("Gemini вернул пустой ответ.")
@@ -265,8 +277,7 @@ def send_telegram_post(text, image_url):
         return False
 
 # ---------- умное обрезание ----------
-def trim_text(text, max_len=1000):
-    """Обрезает до последнего завершённого предложения."""
+def trim_text(text, max_len=900):
     if len(text) <= max_len:
         return text
     cut = text[:max_len]
@@ -310,18 +321,20 @@ def main():
         if not cleaned_text:
             cleaned_text = title
 
-        # Попытка ИИ-рерайта
+        # Попробовать ИИ-рерайт
         edited = ai_rewrite(cleaned_text, image_url)
 
         if not edited:
-            # fallback: очищенный текст + эмодзи + обрезка
-            edited = trim_text(cleaned_text, 900)
+            # Fallback – очищенный текст с эмодзи и обрезанием
+            fallback = cleaned_text
+            # Убираем возможные оставшиеся теги, которые проскочили (повторная очистка)
+            fallback = clean_text(fallback, title="")  # без сравнения с заголовком
+            edited = trim_text(fallback, 900)
             edited = add_emoji_prefix(edited)
-            # добавляем призыв подписаться, если его ещё нет
             if "@Investing_24" not in edited:
                 edited += "\n\nПодпишись на канал @Investing_24"
         else:
-            # Gemini сработал – просто проверяем длину
+            # Gemini сработал – проверяем длину
             if len(edited) > 1024:
                 edited = trim_text(edited, 900)
 

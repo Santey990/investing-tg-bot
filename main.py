@@ -91,7 +91,8 @@ def extract_image(entry):
 
 def clean_text(raw_text, title=""):
     """
-    Удаляем URL, даты, время, строки с 'ПРАЙМ', повторы заголовка и прочий мусор.
+    Удаляем URL, даты, время, строки с 'ПРАЙМ', 'МОСКВА', теги-ключевики.
+    Оставляем только связный текст.
     """
     lines = raw_text.splitlines()
     cleaned = []
@@ -99,27 +100,34 @@ def clean_text(raw_text, title=""):
         line = line.strip()
         if not line:
             continue
-        # Удалить URL
+
+        # Удалить чистые URL
         if re.match(r'https?://\S+', line):
             continue
-        # Удалить строки с датой типа "08.06.2026, ПРАЙМ" или "2026-06-08T16:45+0300"
-        if re.search(r'\d{2}\.\d{2}\.\d{4}', line) and ('ПРАЙМ' in line or 'PRIME' in line.upper()):
+
+        # Удалить строки с датой и источником (например, "МОСКВА, 8 июн - ПРАЙМ")
+        if re.search(r'МОСКВА|ПРАЙМ', line, re.IGNORECASE) and re.search(r'\d{1,2}\s+\w+|\d{4}', line):
             continue
-        if re.match(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{4}', line):
-            continue
-        # Удалить строки, состоящие только из даты и времени
+
+        # Удалить строки только с датой и временем (например, "2026-06-08T16:45+0300")
         if re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{4}', line):
             continue
-        # Удалить строки, которые являются повторением заголовка (полное совпадение)
-        if title and line.lower() == title.lower():
-            continue
-        # Удалить строки, состоящие только из названия источника "ПРАЙМ"
-        if line.upper() in ["ПРАЙМ", "PRIME"]:
-            continue
-        # Если строка содержит только дату в формате "08.06.2026"
+
+        # Удалить строки, состоящие только из даты ("08.06.2026")
         if re.fullmatch(r'\d{2}\.\d{2}\.\d{4}', line):
             continue
+
+        # Удалить строки-теги (1-2 коротких слова, обычно это ключевые слова)
+        words = line.split()
+        if len(words) <= 2 and all(len(w) < 15 for w in words):
+            continue
+
+        # Удалить повторение заголовка (если строка полностью совпадает с заголовком)
+        if title and line.lower() == title.lower():
+            continue
+
         cleaned.append(line)
+
     return "\n".join(cleaned)
 
 def extract_article_text(url, fallback_description=""):
@@ -133,18 +141,21 @@ def extract_article_text(url, fallback_description=""):
         text = soup.get_text(separator="\n", strip=True)
         if len(text) > 200:
             logger.info("Полный текст получен через cloudscraper.")
-            return text[:4000]
+            return text[:8000]   # увеличили лимит
     except Exception as e:
         logger.warning(f"Cloudscraper error for {url}: {e}")
 
     if fallback_description and len(fallback_description.strip()) > 30:
         logger.info("Используем описание из RSS.")
-        return fallback_description.strip()[:4000]
+        return fallback_description.strip()[:8000]
 
     logger.warning("Нет ни полного текста, ни описания.")
     return None
 
 def ai_rewrite(original_text, image_url=None):
+    """
+    Отправляет текст в Gemini и получает переписанный пост до 800 символов.
+    """
     client = genai.Client(api_key=GEMINI_API_KEY)
     prompt = (
         "Ты — редактор телеграм-канала об инвестициях и финансах.\n"
@@ -152,8 +163,9 @@ def ai_rewrite(original_text, image_url=None):
         "Правила:\n"
         "- Используй эмодзи (🔹, 📈, 💡 и т.п.)\n"
         "- Сохрани ключевые цифры и факты\n"
-        "- Максимум 250-300 слов\n"
-        "- Не упоминай, что это пересказ\n"
+        "- Максимум 800 символов (включая эмодзи и пробелы)\n"
+        "- Не упоминай источник (ПРАЙМ, МОСКВА) и дату\n"
+        "- Не перечисляй ключевые слова (теги) в начале\n"
         "- Заверши пост призывом подписаться на канал @Investing_24 (не более одной строки)\n\n"
         f"Исходная статья:\n{original_text}"
     )
@@ -231,15 +243,18 @@ def main():
         if not raw_text:
             raw_text = title
 
-        # Очищаем текст от мусора перед отправкой
+        # Очищаем текст от мусора
         cleaned_text = clean_text(raw_text, title=title)
         if not cleaned_text:
             cleaned_text = title
 
+        # Просим Gemini переписать
         edited = ai_rewrite(cleaned_text, image_url)
         if not edited:
-            # Если Gemini не ответил, используем очищенный текст как fallback
-            edited = title + "\n\n" + cleaned_text[:500] + "..."
+            # Fallback – берём очищенный текст (первые 800 символов)
+            edited = cleaned_text[:800]
+            if len(cleaned_text) > 800:
+                edited += "…"
 
         success = send_telegram_post(edited, image_url)
         if success:

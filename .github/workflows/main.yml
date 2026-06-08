@@ -18,6 +18,15 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
+       - name: Debug secrets
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then echo "TELEGRAM_BOT_TOKEN is empty!"; else echo "TELEGRAM_BOT_TOKEN length: ${#TELEGRAM_BOT_TOKEN}"; fi
+          if [ -z "$TELEGRAM_CHANNEL_ID" ]; then echo "TELEGRAM_CHANNEL_ID is empty!"; else echo "TELEGRAM_CHANNEL_ID length: ${#TELEGRAM_CHANNEL_ID}"; fi
+          if [ -z "$GEMINI_API_KEY" ]; then echo "GEMINI_API_KEY is empty!"; else echo "GEMINI_API_KEY length: ${#GEMINI_API_KEY}"; fi
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: pip install -r requirements.txt
 
       - name: Run bot

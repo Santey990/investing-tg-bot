@@ -90,18 +90,26 @@ def extract_image(entry):
         logger.warning(f"Could not fetch og:image for {entry.link}: {e}")
     return None
 
-# ---------- ОЧИСТКА ТЕКСТА (улучшенная) ----------
+# ---------- проверка на мусор ----------
 def is_tag_line(line):
-    """
-    Проверяет, является ли строка набором ключевых слов через запятую
-    (например: технологии, торги, сша, nvidia, рынок)
-    """
-    # удаляем запятые, оставляем только буквы/цифры
-    words = [w.strip().lower() for w in line.split(',') if w.strip()]
-    if not words:
-        return False
-    # если все слова короткие и их больше 1 – считаем тегами
-    return all(len(w) < 20 for w in words) and len(words) > 1
+    """Определяет, является ли строка ключевыми словами / тегами / метаданными."""
+    line = line.strip()
+    if not line:
+        return True
+    # строка с запятыми из нескольких коротких слов – точно теги
+    parts = [p.strip() for p in line.split(',') if p.strip()]
+    if len(parts) >= 2 and all(len(w) < 20 for w in parts):
+        return True
+    # одиночное короткое слово (1 слово без пробелов) длиной < 20 и без цифр в середине длинных чисел
+    if len(line.split()) == 1 and len(line) < 20 and not re.search(r'\d{4}', line):
+        return True
+    # метки вроде "Новости", "ru-RU"
+    if line.lower() in ["новости", "ru-ru", "ru", "en", "rss"]:
+        return True
+    # год отдельной строкой (например, "2026")
+    if re.fullmatch(r'\d{4}', line):
+        return True
+    return False
 
 def clean_text(raw_text, title=""):
     lines = raw_text.splitlines()
@@ -111,37 +119,36 @@ def clean_text(raw_text, title=""):
         if not line:
             continue
 
-        # Удалить email
+        # email
         if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', line):
             continue
-        # Удалить телефон
+        # телефон
         if re.search(r'(\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{2,4}[-.\s]?\d{2,4}', line):
             continue
 
-        # Удалить строки с названиями агентств
+        # названия агентств
         if re.search(r'ФГУП|МИА|Россия сегодня|internet-group|РИА Новости|ПРАЙМ', line, re.IGNORECASE):
             continue
 
-        # Дата + источник
+        # дата + источник
         if re.search(r'\d{1,2}\s+\w+|\d{4}', line) and re.search(r'МОСКВА|ПРАЙМ', line, re.IGNORECASE):
             continue
 
-        # Дата-время ISO
+        # дата/время
         if re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{4}', line):
             continue
-        # Просто дата
         if re.fullmatch(r'\d{2}\.\d{2}\.\d{4}', line):
             continue
 
-        # Чистый URL
+        # URL
         if re.match(r'https?://\S+', line):
             continue
 
-        # Строка-теги (ключевые слова через запятую)
+        # теги и мусор
         if is_tag_line(line):
             continue
 
-        # Повтор заголовка
+        # повтор заголовка
         if title and line.lower() == title.lower():
             continue
 
@@ -188,7 +195,7 @@ def ai_rewrite(original_text, image_url=None):
             f"Исходная статья:\n{original_text}"
         )
         response = client.models.generate_content(
-            model="gemini-1.5-pro",
+            model="gemini-1.5-flash",
             contents=prompt,
         )
         if response.text:
@@ -234,20 +241,16 @@ def send_telegram_post(text, image_url):
 
 # ---------- умное обрезание ----------
 def trim_text(text, max_len=1000):
-    """Обрезает текст до последнего законченного предложения в пределах max_len."""
+    """Обрезает до последнего завершённого предложения (точка/!/?) в пределах max_len."""
     if len(text) <= max_len:
         return text
     cut = text[:max_len]
-    # ищем последний знак конца предложения
     for sep in ['.', '!', '?']:
         pos = cut.rfind(sep)
-        if pos > 400:  # если нашли не слишком близко к началу
+        if pos > 400:
             return cut[:pos+1]
-    # иначе обрезаем по последнему пробелу
     last_space = cut.rfind(' ')
-    if last_space > 0:
-        return cut[:last_space] + "…"
-    return cut + "…"
+    return cut[:last_space] + "…" if last_space > 0 else cut + "…"
 
 # ---------- главный цикл ----------
 def main():
@@ -284,9 +287,8 @@ def main():
 
         edited = ai_rewrite(cleaned_text, image_url)
         if not edited:
-            # Убираем возможные оставшиеся теги в начале (если clean_text пропустила)
+            # Удаляем возможные оставшиеся теги в начале (если clean_text пропустила)
             lines = cleaned_text.splitlines()
-            # пока первая строка является теговой — удаляем её
             while lines and is_tag_line(lines[0]):
                 lines.pop(0)
             fallback_text = "\n".join(lines).strip()

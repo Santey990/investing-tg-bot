@@ -6,19 +6,18 @@ import feedparser
 import requests
 from bs4 import BeautifulSoup
 from readability import Document
-import google.generativeai as genai
+from google import genai
 
-# --- Config ---
+# --- Настройки (секреты берутся из переменных окружения) ---
 RSS_URL = "https://ru.investing.com/rss/news.rss"
-TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-CHANNEL_ID = os.environ["-1003795164458"]   # e.g. -1001234567890
-GEMINI_API_KEY = os.environ["AQ.Ab8RN6LCcva0AZCiitxYIk-L117YnfRXQ0sJpX2ASb65-EUtEg"]
+TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]        # <-- ИМЯ секрета, а не сам токен
+CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 DATA_FILE = "posted_guids.json"
-MAX_ITEMS_PER_RUN = 5          # process up to 5 new posts each run
+MAX_ITEMS_PER_RUN = 5
 LOG_FILE = "bot.log"
 
-# --- Logging ---
 logging.basicConfig(
     filename=LOG_FILE,
     level=logging.INFO,
@@ -26,20 +25,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
-# --- Persistent storage (GUID list) ---
+# --- Хранилище обработанных GUID ---
 def load_posted_guids():
     if not os.path.exists(DATA_FILE):
         return set()
     with open(DATA_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
-    # keep only the most recent 500 to avoid file bloat
-    return set(data[-500:])
+    return set(data[-500:])   # храним только последние 500, чтобы файл не рос
 
 def save_posted_guids(guids):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(list(guids), f)
 
-# --- 1. Parse RSS and extract image ---
+# --- 1. Парсинг RSS и извлечение картинки ---
 def get_feed_entries():
     feed = feedparser.parse(RSS_URL)
     if feed.bozo:
@@ -47,20 +45,19 @@ def get_feed_entries():
     return feed.entries
 
 def extract_image(entry):
-    """Try to get the lead image from enclosure, media:content, or og:image."""
-    # enclosure (most common in investing.com RSS)
+    # вложение из RSS
     if hasattr(entry, "enclosures") and entry.enclosures:
         enc = entry.enclosures[0]
         if "image" in enc.get("type", ""):
             return enc.href
 
-    # media:content (some feeds)
+    # media:content
     if hasattr(entry, "media_content") and entry.media_content:
         for media in entry.media_content:
             if "image" in media.get("type", ""):
                 return media.get("url")
 
-    # fallback: fetch page and look for og:image
+    # fallback: загружаем страницу и ищем og:image
     try:
         resp = requests.get(entry.link, timeout=15, headers={
             "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"
@@ -74,7 +71,7 @@ def extract_image(entry):
 
     return None
 
-# --- 2. Extract full article text ---
+# --- 2. Извлечение полного текста статьи ---
 def extract_article_text(url):
     try:
         resp = requests.get(url, timeout=15, headers={
@@ -82,23 +79,18 @@ def extract_article_text(url):
         })
         resp.raise_for_status()
         doc = Document(resp.text)
-        # readability extracts main content, but we clean it further
         soup = BeautifulSoup(doc.summary(), "html.parser")
-        # remove images, scripts, styles
         for tag in soup(["script", "style", "img", "figure", "figcaption"]):
             tag.decompose()
         text = soup.get_text(separator="\n", strip=True)
-        # trim to ~4000 chars to keep Gemini happy
-        return text[:4000]
+        return text[:4000]   # ограничиваем длину для Gemini
     except Exception as e:
         logger.error(f"Article extraction failed for {url}: {e}")
         return None
 
-# --- 3. Rewrite with Gemini (free tier) ---
+# --- 3. Переписывание через Gemini (новая библиотека) ---
 def ai_rewrite(original_text, image_url=None):
-    genai.configure(api_key=AQ.Ab8RN6LCcva0AZCiitxYIk-L117YnfRXQ0sJpX2ASb65-EUtEg)
-    model = genai.GenerativeModel("gemini-1.5-flash")   # free, fast
-
+    client = genai.Client(api_key=GEMINI_API_KEY)
     prompt = (
         "Ты — редактор телеграм-канала об инвестициях и финансах.\n"
         "Перепиши новость в яркий и лаконичный пост для Telegram.\n"
@@ -112,7 +104,10 @@ def ai_rewrite(original_text, image_url=None):
     )
 
     try:
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=prompt,
+        )
         if response.text:
             return response.text.strip()
         else:
@@ -122,11 +117,10 @@ def ai_rewrite(original_text, image_url=None):
         logger.error(f"Gemini API error: {e}")
         return None
 
-# --- 4. Send to Telegram ---
+# --- 4. Отправка поста в Telegram ---
 def send_telegram_post(text, image_url):
     base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     if image_url:
-        # Telegram can accept direct image URLs
         payload = {
             "chat_id": CHANNEL_ID,
             "photo": image_url,
@@ -156,7 +150,7 @@ def send_telegram_post(text, image_url):
         logger.error(f"Telegram send error: {e}")
         return False
 
-# --- Main workflow ---
+# --- Главный процесс ---
 def main():
     logger.info("=== Starting bot run ===")
     posted = load_posted_guids()
@@ -177,20 +171,18 @@ def main():
         full_text = extract_article_text(entry.link)
         if not full_text:
             logger.warning(f"Skipping {entry.link} – no text extracted.")
-            posted.add(guid)   # mark as processed to avoid endless retries
+            posted.add(guid)
             continue
 
-        # AI rewrite
         edited = ai_rewrite(full_text, image_url)
         if not edited:
-            edited = entry.title + "\n\n" + full_text[:500] + "..."  # fallback
+            edited = entry.title + "\n\n" + full_text[:500] + "..."
 
-        # Send
         success = send_telegram_post(edited, image_url)
         if success:
             posted.add(guid)
             new_items += 1
-            time.sleep(2)   # gentle rate limit
+            time.sleep(2)   # не спамим
         else:
             logger.error(f"Failed to send post for {entry.link}")
 

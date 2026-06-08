@@ -2,22 +2,18 @@ name: Auto-Investing-Bot
 
 on:
   schedule:
-    # Runs every 30 minutes. Adjust the cron as you like.
     - cron: '*/30 * * * *'
-  workflow_dispatch:   # allows manual run
+  workflow_dispatch:
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # needed to commit posted_guids.json
+      contents: write
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -30,6 +26,11 @@ jobs:
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python main.py
+
+      # Показываем лог в консоли для диагностики
+      - name: Show bot log
+        if: always()
+        run: cat bot.log
 
       - name: Commit and push if posted_guids.json changed
         if: success()

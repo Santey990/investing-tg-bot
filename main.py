@@ -4,12 +4,10 @@ import requests
 import cloudscraper
 from bs4 import BeautifulSoup
 from readability import Document
-from google import genai
 
 RSS_URL = "https://1prime.ru/export/rss2/index.xml"
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 DATA_FILE = "posted_guids.json"
 MAX_ITEMS_PER_RUN = 5
@@ -124,20 +122,14 @@ def is_garbage_line(line):
     if re.match(r'https?://\S+', line):
         return True
 
-    # Теги через запятую (ключевые слова) – с проверкой на отсутствие глаголов
+    # Строка с запятыми (теги): если ≥2 запятых, все части <25 символов, нет глагольных окончаний
     parts = [p.strip() for p in line.split(',') if p.strip()]
-    if len(parts) >= 2 and all(len(w) < 35 for w in parts):
-        if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают')) for w in parts):
+    if len(parts) >= 2 and all(len(w) < 25 for w in parts):
+        if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают', 'ил', 'ел')) for w in parts):
             return True
 
-    # Одиночные короткие слова-теги (1-3 слова, без глаголов)
-    words = line.split()
-    if 1 <= len(words) <= 3 and all(len(w) < 20 for w in words):
-        if not any(w[0].isdigit() for w in words):
-            return True
-
-    # Строки, начинающиеся со знака препинания (обрывки)
-    if line and line[0] in ',.;:!?':
+    # Строки, начинающиеся с тире (обрывки цитат)
+    if line.startswith('—'):
         return True
 
     return False
@@ -183,50 +175,18 @@ def extract_article_text(url, fallback_description=""):
 
 # ---------- эмодзи ----------
 def add_emoji_prefix(text):
-    lines = text.splitlines()
-    while lines and re.fullmatch(r'20\d{2}', lines[0].strip()):
-        lines.pop(0)
-    text = "\n".join(lines).strip()
     lower = text.lower()
     if any(w in lower for w in ['акци', 'биржа', 'индекс', 'торг', 's&p', 'nasdaq', 'инвест']):
         return "📈 " + text
     if any(w in lower for w in ['нефть', 'газ', 'топлив', 'энерг']):
         return "🛢️ " + text
+    if any(w in lower for w in ['золот', 'серебр', 'драгметалл']):
+        return "💰 " + text
     if any(w in lower for w in ['банк', 'кредит', 'финанс', 'втб', 'сбер']):
         return "🏦 " + text
     if any(w in lower for w in ['доллар', 'валюта', 'рубл']):
         return "💵 " + text
     return "🔹 " + text
-
-# ---------- ИИ рерайт ----------
-def ai_rewrite(original_text, image_url=None):
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        prompt = (
-            "Ты — редактор телеграм-канала об инвестициях и финансах.\n"
-            "Перепиши новость в яркий и лаконичный пост для Telegram.\n"
-            "Правила:\n"
-            "- Используй эмодзи (🔹, 📈, 💡 и т.п.)\n"
-            "- Сохрани ключевые цифры и факты\n"
-            "- Максимум 800 символов (включая эмодзи и пробелы)\n"
-            "- Не упоминай источник (ПРАЙМ, МОСКВА, РИА) и дату\n"
-            "- Не вставляй контактные данные\n"
-            "- Заверши пост призывом подписаться на канал @Investing_24 (не более одной строки)\n\n"
-            f"Исходная статья:\n{original_text}"
-        )
-        response = client.models.generate_content(
-            model="models/gemini-1.5-flash",   # полный путь
-            contents=prompt,
-        )
-        if response.text:
-            logger.info("Gemini успешно переписал текст.")
-            return response.text.strip()
-        else:
-            logger.error("Gemini вернул пустой ответ.")
-            return None
-    except Exception as e:
-        logger.error(f"Ошибка Gemini API: {e}")
-        return None
 
 # ---------- отправка в Telegram ----------
 def send_telegram_post(text, image_url):
@@ -292,50 +252,51 @@ def main():
         if new_items >= MAX_ITEMS_PER_RUN:
             break
 
-        title = entry.get("title", "")
-        logger.info(f"Обрабатываю: {title}")
+        original_title = entry.get("title", "")
+        logger.info(f"Обрабатываю: {original_title}")
 
         image_url = extract_image(entry)
         description = entry.get("description", "")
         raw_text = extract_article_text(entry.link, fallback_description=description)
         if not raw_text:
-            raw_text = title
+            raw_text = original_title
 
-        cleaned_text = clean_text(raw_text, title=title)
+        # Первичная очистка с исходным заголовком
+        cleaned_text = clean_text(raw_text, title=original_title)
         if not cleaned_text:
-            cleaned_text = title
+            cleaned_text = original_title
 
-        # Если оригинальный title был мусором, выберем новый заголовок из текста
+        # Если исходный заголовок — мусор, ищем нормальный в тексте
+        title = original_title
         if is_garbage_line(title):
             lines = cleaned_text.splitlines()
-            # Ищем первую строку, которая не является мусором и не начинается с маленькой буквы
             new_title = ""
-            for line in lines:
+            for i, line in enumerate(lines):
                 if line and not is_garbage_line(line) and line[0].isupper():
                     new_title = line
+                    # Удаляем эту строку из cleaned_text
+                    lines.pop(i)
+                    cleaned_text = "\n".join(lines) if lines else ""
                     break
             if new_title:
                 title = new_title
-                # Удаляем эту строку из cleaned_text, чтобы она не повторялась
-                cleaned_text = "\n".join(lines[1:]).strip() if len(lines) > 1 else ""
-                if not cleaned_text:
-                    cleaned_text = title
 
-        # Попытка ИИ-рерайта
-        edited = ai_rewrite(cleaned_text, image_url)
+        # Удаляем из текста дубликаты нового заголовка (если они ещё остались)
+        if title != original_title:
+            # Удаляем строки, совпадающие с original_title (на всякий случай)
+            cleaned_text = "\n".join([l for l in cleaned_text.splitlines() if l.lower() != original_title.lower()])
+        # И удаляем строки, совпадающие с текущим title
+        cleaned_text = "\n".join([l for l in cleaned_text.splitlines() if l.lower() != title.lower()])
 
-        if not edited:
-            # Fallback – формируем пост с заголовком
-            body = trim_text(cleaned_text, 800) if cleaned_text else ""
-            final_post = add_emoji_prefix(title) + "\n\n" + body if body else add_emoji_prefix(title)
-            if "@Investing_24" not in final_post:
-                final_post += "\n\nПодпишись на канал @Investing_24"
-            edited = final_post
-        else:
-            if len(edited) > 1024:
-                edited = trim_text(edited, 900)
+        # Формируем пост: эмодзи + заголовок + перенос + тело (обрезанное)
+        body = trim_text(cleaned_text, 800) if cleaned_text else ""
+        post = add_emoji_prefix(title)
+        if body:
+            post += "\n\n" + body
+        if "@Investing_24" not in post:
+            post += "\n\nПодпишись на канал @Investing_24"
 
-        success = send_telegram_post(edited, image_url)
+        success = send_telegram_post(post, image_url)
         if success:
             posted.add(guid)
             new_items += 1

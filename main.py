@@ -27,7 +27,7 @@ logger = logging.getLogger()
 
 scraper = cloudscraper.create_scraper()
 
-# ---------- работа с GUID ----------
+# ---------- GUID ----------
 def load_posted_guids():
     if not os.path.exists(DATA_FILE):
         return set()
@@ -90,7 +90,19 @@ def extract_image(entry):
         logger.warning(f"Could not fetch og:image for {entry.link}: {e}")
     return None
 
-# ---------- очистка текста (усиленная) ----------
+# ---------- ОЧИСТКА ТЕКСТА (улучшенная) ----------
+def is_tag_line(line):
+    """
+    Проверяет, является ли строка набором ключевых слов через запятую
+    (например: технологии, торги, сша, nvidia, рынок)
+    """
+    # удаляем запятые, оставляем только буквы/цифры
+    words = [w.strip().lower() for w in line.split(',') if w.strip()]
+    if not words:
+        return False
+    # если все слова короткие и их больше 1 – считаем тегами
+    return all(len(w) < 20 for w in words) and len(words) > 1
+
 def clean_text(raw_text, title=""):
     lines = raw_text.splitlines()
     cleaned = []
@@ -99,38 +111,37 @@ def clean_text(raw_text, title=""):
         if not line:
             continue
 
-        # email
+        # Удалить email
         if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', line):
             continue
-        # телефон (разные форматы)
+        # Удалить телефон
         if re.search(r'(\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{2,4}[-.\s]?\d{2,4}', line):
             continue
 
-        # строки с типичными названиями агентств
+        # Удалить строки с названиями агентств
         if re.search(r'ФГУП|МИА|Россия сегодня|internet-group|РИА Новости|ПРАЙМ', line, re.IGNORECASE):
             continue
 
-        # дата + источник ("МОСКВА, 8 июн - ПРАЙМ")
+        # Дата + источник
         if re.search(r'\d{1,2}\s+\w+|\d{4}', line) and re.search(r'МОСКВА|ПРАЙМ', line, re.IGNORECASE):
             continue
 
-        # только дата-время (2026-06-08T16:45+0300)
+        # Дата-время ISO
         if re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{4}', line):
             continue
-        # только дата 08.06.2026
+        # Просто дата
         if re.fullmatch(r'\d{2}\.\d{2}\.\d{4}', line):
             continue
 
-        # чистый URL
+        # Чистый URL
         if re.match(r'https?://\S+', line):
             continue
 
-        # строка-теги (1-3 коротких слова, часто через запятую)
-        words = line.replace(',', ' ').split()
-        if len(words) <= 3 and all(len(w) < 20 for w in words):
+        # Строка-теги (ключевые слова через запятую)
+        if is_tag_line(line):
             continue
 
-        # повторение заголовка
+        # Повтор заголовка
         if title and line.lower() == title.lower():
             continue
 
@@ -177,7 +188,7 @@ def ai_rewrite(original_text, image_url=None):
             f"Исходная статья:\n{original_text}"
         )
         response = client.models.generate_content(
-            model="gemini-2.0-flash-exp",
+            model="gemini-1.5-pro",
             contents=prompt,
         )
         if response.text:
@@ -221,6 +232,23 @@ def send_telegram_post(text, image_url):
         logger.error(f"Telegram send error: {e}")
         return False
 
+# ---------- умное обрезание ----------
+def trim_text(text, max_len=1000):
+    """Обрезает текст до последнего законченного предложения в пределах max_len."""
+    if len(text) <= max_len:
+        return text
+    cut = text[:max_len]
+    # ищем последний знак конца предложения
+    for sep in ['.', '!', '?']:
+        pos = cut.rfind(sep)
+        if pos > 400:  # если нашли не слишком близко к началу
+            return cut[:pos+1]
+    # иначе обрезаем по последнему пробелу
+    last_space = cut.rfind(' ')
+    if last_space > 0:
+        return cut[:last_space] + "…"
+    return cut + "…"
+
 # ---------- главный цикл ----------
 def main():
     logger.info("=== Запуск бота ===")
@@ -256,16 +284,15 @@ def main():
 
         edited = ai_rewrite(cleaned_text, image_url)
         if not edited:
-            # Умный fallback: обрезаем по последней точке в пределах 900 символов
-            if len(cleaned_text) <= 900:
-                edited = cleaned_text
-            else:
-                cut = cleaned_text[:900]
-                last_period = max(cut.rfind('.'), cut.rfind('!'), cut.rfind('?'))
-                if last_period > 400:
-                    edited = cleaned_text[:last_period+1]
-                else:
-                    edited = cut + "…"
+            # Убираем возможные оставшиеся теги в начале (если clean_text пропустила)
+            lines = cleaned_text.splitlines()
+            # пока первая строка является теговой — удаляем её
+            while lines and is_tag_line(lines[0]):
+                lines.pop(0)
+            fallback_text = "\n".join(lines).strip()
+            if not fallback_text:
+                fallback_text = title
+            edited = trim_text(fallback_text, 1000)
 
         success = send_telegram_post(edited, image_url)
         if success:

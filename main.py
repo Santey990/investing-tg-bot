@@ -1,4 +1,4 @@
-import os, json, time, logging, sys, re
+import os, json, time, logging, sys, re, hashlib
 import feedparser
 import requests
 import cloudscraper
@@ -32,18 +32,27 @@ def load_posted_guids():
     with open(DATA_FILE, "r", encoding="utf-8") as f:
         raw = f.read().strip()
     if not raw:
-        logger.warning("posted_guids.json is empty, starting fresh.")
+        logger.warning("posted_guids.json пуст, начинаю с чистого списка.")
         return set()
     try:
         data = json.loads(raw)
-        return set(data[-500:])
+        return set(data[-1000:])          # храним последние 1000, чтобы не рос бесконечно
     except json.JSONDecodeError:
-        logger.error("Invalid JSON in posted_guids.json, resetting file.")
+        logger.error("Ошибка в JSON, сбрасываю список.")
         return set()
 
 def save_posted_guids(guids):
+    """Сохраняет множество GUID в файл (гарантированно перезаписывает)."""
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(list(guids), f)
+
+def make_guid(entry):
+    """Генерирует уникальный идентификатор для записи RSS."""
+    if hasattr(entry, "id") and entry.id:
+        return entry.id
+    # иначе строим хэш от ссылки + заголовка (стабильный)
+    raw = entry.link + entry.get("title", "")
+    return hashlib.md5(raw.encode()).hexdigest()
 
 # ---------- RSS ----------
 def fetch_rss(url):
@@ -53,7 +62,7 @@ def fetch_rss(url):
         resp.raise_for_status()
         return resp.content
     except Exception as e:
-        logger.error(f"Failed to download RSS: {e}")
+        logger.error(f"Не удалось скачать RSS: {e}")
         return None
 
 def get_feed_entries():
@@ -62,8 +71,8 @@ def get_feed_entries():
         return []
     feed = feedparser.parse(content)
     if feed.bozo:
-        logger.error(f"RSS parse error: {feed.bozo_exception}")
-    logger.info(f"RSS feed contains {len(feed.entries)} items.")
+        logger.error(f"Ошибка парсинга RSS: {feed.bozo_exception}")
+    logger.info(f"В ленте {len(feed.entries)} новостей.")
     return feed.entries
 
 # ---------- изображение ----------
@@ -85,30 +94,26 @@ def extract_image(entry):
         if og_img and og_img.get("content"):
             return og_img["content"]
     except Exception as e:
-        logger.warning(f"Could not fetch og:image for {entry.link}: {e}")
+        logger.warning(f"Не удалось извлечь изображение: {e}")
     return None
 
-# ---------- мусорная строка (улучшена) ----------
+# ---------- мусорная строка ----------
 def is_garbage_line(line):
     line = line.strip()
     if not line:
         return True
 
-    # email / телефон
     if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', line):
         return True
     if re.search(r'(\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{2,4}[-.\s]?\d{2,4}', line):
         return True
 
-    # агентства
     if re.search(r'ФГУП|МИА|Россия сегодня|internet-group|РИА Новости|ПРАЙМ', line, re.IGNORECASE):
         return True
 
-    # дата + источник
     if re.search(r'\d{1,2}\s+\w+|\d{4}', line) and re.search(r'МОСКВА|ПРАЙМ', line, re.IGNORECASE):
         return True
 
-    # даты
     if re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{4}', line):
         return True
     if re.fullmatch(r'\d{2}\.\d{2}\.\d{4}', line):
@@ -118,24 +123,19 @@ def is_garbage_line(line):
     if re.fullmatch(r'\d{4}', line):
         return True
 
-    # URL
     if re.match(r'https?://\S+', line):
         return True
 
-    # обрывки цитат
     if line.startswith('—') or line.startswith('- '):
         return True
-    # обрывки: начинается со знака препинания
     if line and line[0] in ',.;:!?':
         return True
 
-    # теги через запятую (ключевые слова) – если >=2 запятых, все части <25 символов и нет глаголов
     parts = [p.strip() for p in line.split(',') if p.strip()]
     if len(parts) >= 2 and all(len(w) < 25 for w in parts):
         if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают', 'ил', 'ел', 'ет', 'ит', 'ут', 'ют')) for w in parts):
             return True
 
-    # короткие строки из 1-3 слов без глаголов (одиночные теги)
     words = line.split()
     if 1 <= len(words) <= 3 and all(len(w) < 20 for w in words):
         if not any(w[0].isdigit() for w in words):
@@ -162,7 +162,6 @@ def clean_text(raw_text, title=""):
         prev_ended = line.endswith(('.', '!', '?'))
     return "\n".join(cleaned)
 
-# ---------- фильтрация тела: только хорошие строки (добавлен вызов is_garbage_line) ----------
 def has_verb(line):
     return any(w.endswith(('ет', 'ит', 'ут', 'ют', 'ал', 'ил', 'ел', 'ть', 'чь', 'ся', 'сь', 'ете', 'ают', 'яют', 'ует', 'ирует')) for w in line.split())
 
@@ -177,7 +176,6 @@ def filter_body_lines(text):
             result.append(line)
     return "\n".join(result)
 
-# ---------- извлечение статьи ----------
 def extract_article_text(url, fallback_description=""):
     try:
         resp = scraper.get(url, timeout=15)
@@ -188,17 +186,16 @@ def extract_article_text(url, fallback_description=""):
             tag.decompose()
         text = soup.get_text(separator="\n", strip=True)
         if len(text) > 200:
-            logger.info("Полный текст получен через cloudscraper.")
+            logger.info("Полный текст получен.")
             return text[:9000]
     except Exception as e:
-        logger.warning(f"Cloudscraper error for {url}: {e}")
+        logger.warning(f"Ошибка cloudscraper: {e}")
 
     if fallback_description and len(fallback_description.strip()) > 30:
-        logger.info("Используем описание из RSS.")
+        logger.info("Использую описание из RSS.")
         return fallback_description.strip()[:9000]
     return None
 
-# ---------- эмодзи ----------
 def add_emoji_prefix(text):
     lower = text.lower()
     if any(w in lower for w in ['акци', 'биржа', 'индекс', 'торг', 's&p', 'nasdaq', 'инвест']):
@@ -213,7 +210,6 @@ def add_emoji_prefix(text):
         return "💵 " + text
     return "🔹 " + text
 
-# ---------- отправка в Telegram ----------
 def send_telegram_post(text, image_url):
     base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     if image_url:
@@ -227,15 +223,14 @@ def send_telegram_post(text, image_url):
         resp.raise_for_status()
         result = resp.json()
         if not result.get("ok"):
-            logger.error(f"Telegram API error: {result}")
+            logger.error(f"Telegram API ошибка: {result}")
             return False
-        logger.info("Пост успешно отправлен.")
+        logger.info("Пост отправлен.")
         return True
     except Exception as e:
-        logger.error(f"Telegram send error: {e}")
+        logger.error(f"Ошибка отправки: {e}")
         return False
 
-# ---------- умное обрезание ----------
 def trim_text(text, max_len=900):
     if len(text) <= max_len:
         return text
@@ -253,15 +248,14 @@ def main():
     posted = load_posted_guids()
     entries = get_feed_entries()
     if not entries:
-        logger.warning("Новостей в ленте нет. Выход.")
+        logger.warning("Нет новостей. Выход.")
         return
 
-    logger.info(f"Найдено {len(entries)} записей, обработано ранее: {len(posted)}.")
+    logger.info(f"Новостей в ленте: {len(entries)}, уже обработано: {len(posted)}.")
     new_items = 0
-    posted_changed = False
 
     for entry in entries:
-        guid = entry.get("id") or entry.link
+        guid = make_guid(entry)
         if guid in posted:
             continue
         if new_items >= MAX_ITEMS_PER_RUN:
@@ -276,12 +270,10 @@ def main():
         if not raw_text:
             raw_text = original_title
 
-        # первичная очистка с исходным заголовком
         cleaned_text = clean_text(raw_text, title=original_title)
         if not cleaned_text:
             cleaned_text = original_title
 
-        # если заголовок мусорный – ищем нормальный в теле
         title = original_title
         if is_garbage_line(title):
             lines = cleaned_text.splitlines()
@@ -295,7 +287,6 @@ def main():
             if new_title:
                 title = new_title
 
-        # удаляем строки, начинающиеся с любого из заголовков (дубликаты)
         cleaned_lines = cleaned_text.splitlines()
         filtered = []
         for line in cleaned_lines:
@@ -306,11 +297,9 @@ def main():
             filtered.append(line)
         cleaned_text = "\n".join(filtered)
 
-        # фильтруем тело – теперь is_garbage_line работает внутри
         body = filter_body_lines(cleaned_text)
         body = trim_text(body, 800) if body else ""
 
-        # если тело пустое – берём первую не мусорную строку из cleaned_text
         if not body and cleaned_text:
             for line in cleaned_text.splitlines():
                 if line and not is_garbage_line(line):
@@ -329,16 +318,17 @@ def main():
         if success:
             posted.add(guid)
             new_items += 1
-            posted_changed = True
+            # ----- ВАЖНО: сохраняем сразу после успешной отправки -----
+            save_posted_guids(posted)
+            logger.info(f"GUID {guid} сохранён. Всего обработано: {len(posted)}.")
             time.sleep(2)
         else:
             logger.error(f"Не удалось отправить пост для {entry.link}")
 
-    if posted_changed:
-        save_posted_guids(posted)
-        logger.info(f"Сохранено GUID: добавлено {new_items} новых.")
+    if new_items == 0:
+        logger.info("Новых постов нет.")
     else:
-        logger.info("Новых записей нет.")
+        logger.info(f"Добавлено {new_items} постов.")
 
 if __name__ == "__main__":
     main()

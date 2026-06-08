@@ -5,7 +5,6 @@ from bs4 import BeautifulSoup
 from readability import Document
 from google import genai
 
-# Настройки
 RSS_URL = "https://ru.investing.com/rss/news.rss"
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
@@ -15,7 +14,6 @@ DATA_FILE = "posted_guids.json"
 MAX_ITEMS_PER_RUN = 5
 LOG_FILE = "bot.log"
 
-# Логгирование: и в файл, и в консоль (stdout)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s: %(message)s",
@@ -46,7 +44,6 @@ def save_posted_guids(guids):
         json.dump(list(guids), f)
 
 def fetch_rss(url):
-    """Скачиваем RSS с браузерным User-Agent, чтобы не банили."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
     }
@@ -61,7 +58,6 @@ def fetch_rss(url):
 def get_feed_entries():
     content = fetch_rss(RSS_URL)
     if content is None:
-        logger.error("No RSS content retrieved.")
         return []
     feed = feedparser.parse(content)
     if feed.bozo:
@@ -91,20 +87,32 @@ def extract_image(entry):
     return None
 
 def extract_article_text(url):
-    try:
-        resp = requests.get(url, timeout=15, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"
-        })
-        resp.raise_for_status()
-        doc = Document(resp.text)
-        soup = BeautifulSoup(doc.summary(), "html.parser")
-        for tag in soup(["script", "style", "img", "figure", "figcaption"]):
-            tag.decompose()
-        text = soup.get_text(separator="\n", strip=True)
-        return text[:4000]
-    except Exception as e:
-        logger.error(f"Article extraction failed for {url}: {e}")
-        return None
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Referer": "https://ru.investing.com/",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            doc = Document(resp.text)
+            soup = BeautifulSoup(doc.summary(), "html.parser")
+            for tag in soup(["script", "style", "img", "figure", "figcaption"]):
+                tag.decompose()
+            text = soup.get_text(separator="\n", strip=True)
+            return text[:4000]
+        except requests.exceptions.HTTPError as e:
+            logger.warning(f"Attempt {attempt+1} failed for {url}: {e}")
+            time.sleep(2)
+        except Exception as e:
+            logger.error(f"Article extraction error on {url}: {e}")
+            break
+    return None
 
 def ai_rewrite(original_text, image_url=None):
     client = genai.Client(api_key=GEMINI_API_KEY)

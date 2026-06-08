@@ -8,9 +8,8 @@ from bs4 import BeautifulSoup
 from readability import Document
 from google import genai
 
-# --- Настройки (секреты берутся из переменных окружения) ---
 RSS_URL = "https://ru.investing.com/rss/news.rss"
-TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]        # <-- ИМЯ секрета, а не сам токен
+TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
@@ -25,19 +24,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
-# --- Хранилище обработанных GUID ---
 def load_posted_guids():
     if not os.path.exists(DATA_FILE):
         return set()
     with open(DATA_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return set(data[-500:])   # храним только последние 500, чтобы файл не рос
+        raw = f.read().strip()
+    if not raw:
+        logger.warning("posted_guids.json is empty, starting fresh.")
+        return set()
+    try:
+        data = json.loads(raw)
+        return set(data[-500:])
+    except json.JSONDecodeError:
+        logger.error("Invalid JSON in posted_guids.json, resetting file.")
+        return set()
 
 def save_posted_guids(guids):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(list(guids), f)
 
-# --- 1. Парсинг RSS и извлечение картинки ---
 def get_feed_entries():
     feed = feedparser.parse(RSS_URL)
     if feed.bozo:
@@ -45,19 +50,14 @@ def get_feed_entries():
     return feed.entries
 
 def extract_image(entry):
-    # вложение из RSS
     if hasattr(entry, "enclosures") and entry.enclosures:
         enc = entry.enclosures[0]
         if "image" in enc.get("type", ""):
             return enc.href
-
-    # media:content
     if hasattr(entry, "media_content") and entry.media_content:
         for media in entry.media_content:
             if "image" in media.get("type", ""):
                 return media.get("url")
-
-    # fallback: загружаем страницу и ищем og:image
     try:
         resp = requests.get(entry.link, timeout=15, headers={
             "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"
@@ -68,10 +68,8 @@ def extract_image(entry):
             return og_img["content"]
     except Exception as e:
         logger.warning(f"Could not fetch og:image for {entry.link}: {e}")
-
     return None
 
-# --- 2. Извлечение полного текста статьи ---
 def extract_article_text(url):
     try:
         resp = requests.get(url, timeout=15, headers={
@@ -83,12 +81,11 @@ def extract_article_text(url):
         for tag in soup(["script", "style", "img", "figure", "figcaption"]):
             tag.decompose()
         text = soup.get_text(separator="\n", strip=True)
-        return text[:4000]   # ограничиваем длину для Gemini
+        return text[:4000]
     except Exception as e:
         logger.error(f"Article extraction failed for {url}: {e}")
         return None
 
-# --- 3. Переписывание через Gemini (новая библиотека) ---
 def ai_rewrite(original_text, image_url=None):
     client = genai.Client(api_key=GEMINI_API_KEY)
     prompt = (
@@ -102,7 +99,6 @@ def ai_rewrite(original_text, image_url=None):
         "- Заверши пост призывом подписаться на канал @Investing_24 (не более одной строки)\n\n"
         f"Исходная статья:\n{original_text}"
     )
-
     try:
         response = client.models.generate_content(
             model="gemini-1.5-flash",
@@ -117,7 +113,6 @@ def ai_rewrite(original_text, image_url=None):
         logger.error(f"Gemini API error: {e}")
         return None
 
-# --- 4. Отправка поста в Telegram ---
 def send_telegram_post(text, image_url):
     base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     if image_url:
@@ -136,7 +131,6 @@ def send_telegram_post(text, image_url):
             "disable_web_page_preview": True,
         }
         method = "sendMessage"
-
     try:
         resp = requests.post(f"{base}/{method}", data=payload, timeout=20)
         resp.raise_for_status()
@@ -150,7 +144,6 @@ def send_telegram_post(text, image_url):
         logger.error(f"Telegram send error: {e}")
         return False
 
-# --- Главный процесс ---
 def main():
     logger.info("=== Starting bot run ===")
     posted = load_posted_guids()
@@ -166,7 +159,6 @@ def main():
             break
 
         logger.info(f"Processing new item: {entry.title}")
-
         image_url = extract_image(entry)
         full_text = extract_article_text(entry.link)
         if not full_text:
@@ -182,7 +174,7 @@ def main():
         if success:
             posted.add(guid)
             new_items += 1
-            time.sleep(2)   # не спамим
+            time.sleep(2)
         else:
             logger.error(f"Failed to send post for {entry.link}")
 

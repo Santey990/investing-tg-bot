@@ -27,6 +27,7 @@ logger = logging.getLogger()
 
 scraper = cloudscraper.create_scraper()
 
+# ---------- работа с GUID ----------
 def load_posted_guids():
     if not os.path.exists(DATA_FILE):
         return set()
@@ -46,10 +47,9 @@ def save_posted_guids(guids):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(list(guids), f)
 
+# ---------- RSS ----------
 def fetch_rss(url):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
         resp = requests.get(url, headers=headers, timeout=20)
         resp.raise_for_status()
@@ -68,6 +68,7 @@ def get_feed_entries():
     logger.info(f"RSS feed contains {len(feed.entries)} items.")
     return feed.entries
 
+# ---------- изображение ----------
 def extract_image(entry):
     if hasattr(entry, "enclosures") and entry.enclosures:
         enc = entry.enclosures[0]
@@ -89,11 +90,8 @@ def extract_image(entry):
         logger.warning(f"Could not fetch og:image for {entry.link}: {e}")
     return None
 
+# ---------- очистка текста (усиленная) ----------
 def clean_text(raw_text, title=""):
-    """
-    Удаляем URL, даты, время, строки с 'ПРАЙМ', 'МОСКВА', теги-ключевики.
-    Оставляем только связный текст.
-    """
     lines = raw_text.splitlines()
     cleaned = []
     for line in lines:
@@ -101,28 +99,38 @@ def clean_text(raw_text, title=""):
         if not line:
             continue
 
-        # Удалить чистые URL
-        if re.match(r'https?://\S+', line):
+        # email
+        if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', line):
+            continue
+        # телефон (разные форматы)
+        if re.search(r'(\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{2,4}[-.\s]?\d{2,4}', line):
             continue
 
-        # Удалить строки с датой и источником (например, "МОСКВА, 8 июн - ПРАЙМ")
-        if re.search(r'МОСКВА|ПРАЙМ', line, re.IGNORECASE) and re.search(r'\d{1,2}\s+\w+|\d{4}', line):
+        # строки с типичными названиями агентств
+        if re.search(r'ФГУП|МИА|Россия сегодня|internet-group|РИА Новости|ПРАЙМ', line, re.IGNORECASE):
             continue
 
-        # Удалить строки только с датой и временем (например, "2026-06-08T16:45+0300")
+        # дата + источник ("МОСКВА, 8 июн - ПРАЙМ")
+        if re.search(r'\d{1,2}\s+\w+|\d{4}', line) and re.search(r'МОСКВА|ПРАЙМ', line, re.IGNORECASE):
+            continue
+
+        # только дата-время (2026-06-08T16:45+0300)
         if re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{4}', line):
             continue
-
-        # Удалить строки, состоящие только из даты ("08.06.2026")
+        # только дата 08.06.2026
         if re.fullmatch(r'\d{2}\.\d{2}\.\d{4}', line):
             continue
 
-        # Удалить строки-теги (1-2 коротких слова, обычно это ключевые слова)
-        words = line.split()
-        if len(words) <= 2 and all(len(w) < 15 for w in words):
+        # чистый URL
+        if re.match(r'https?://\S+', line):
             continue
 
-        # Удалить повторение заголовка (если строка полностью совпадает с заголовком)
+        # строка-теги (1-3 коротких слова, часто через запятую)
+        words = line.replace(',', ' ').split()
+        if len(words) <= 3 and all(len(w) < 20 for w in words):
+            continue
+
+        # повторение заголовка
         if title and line.lower() == title.lower():
             continue
 
@@ -130,6 +138,7 @@ def clean_text(raw_text, title=""):
 
     return "\n".join(cleaned)
 
+# ---------- извлечение статьи ----------
 def extract_article_text(url, fallback_description=""):
     try:
         resp = scraper.get(url, timeout=15)
@@ -141,37 +150,34 @@ def extract_article_text(url, fallback_description=""):
         text = soup.get_text(separator="\n", strip=True)
         if len(text) > 200:
             logger.info("Полный текст получен через cloudscraper.")
-            return text[:8000]   # увеличили лимит
+            return text[:9000]
     except Exception as e:
         logger.warning(f"Cloudscraper error for {url}: {e}")
 
     if fallback_description and len(fallback_description.strip()) > 30:
         logger.info("Используем описание из RSS.")
-        return fallback_description.strip()[:8000]
+        return fallback_description.strip()[:9000]
 
-    logger.warning("Нет ни полного текста, ни описания.")
     return None
 
+# ---------- ИИ рерайт ----------
 def ai_rewrite(original_text, image_url=None):
-    """
-    Отправляет текст в Gemini и получает переписанный пост до 800 символов.
-    """
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    prompt = (
-        "Ты — редактор телеграм-канала об инвестициях и финансах.\n"
-        "Перепиши новость в яркий и лаконичный пост для Telegram.\n"
-        "Правила:\n"
-        "- Используй эмодзи (🔹, 📈, 💡 и т.п.)\n"
-        "- Сохрани ключевые цифры и факты\n"
-        "- Максимум 800 символов (включая эмодзи и пробелы)\n"
-        "- Не упоминай источник (ПРАЙМ, МОСКВА) и дату\n"
-        "- Не перечисляй ключевые слова (теги) в начале\n"
-        "- Заверши пост призывом подписаться на канал @Investing_24 (не более одной строки)\n\n"
-        f"Исходная статья:\n{original_text}"
-    )
     try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        prompt = (
+            "Ты — редактор телеграм-канала об инвестициях и финансах.\n"
+            "Перепиши новость в яркий и лаконичный пост для Telegram.\n"
+            "Правила:\n"
+            "- Используй эмодзи (🔹, 📈, 💡 и т.п.)\n"
+            "- Сохрани ключевые цифры и факты\n"
+            "- Максимум 800 символов (включая эмодзи и пробелы)\n"
+            "- Не упоминай источник (ПРАЙМ, МОСКВА, РИА) и дату\n"
+            "- Не вставляй контактные данные\n"
+            "- Заверши пост призывом подписаться на канал @Investing_24 (не более одной строки)\n\n"
+            f"Исходная статья:\n{original_text}"
+        )
         response = client.models.generate_content(
-            model="gemini-1.5-pro",
+            model="gemini-2.0-flash-exp",
             contents=prompt,
         )
         if response.text:
@@ -183,6 +189,7 @@ def ai_rewrite(original_text, image_url=None):
         logger.error(f"Ошибка Gemini API: {e}")
         return None
 
+# ---------- отправка в Telegram ----------
 def send_telegram_post(text, image_url):
     base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     if image_url:
@@ -214,6 +221,7 @@ def send_telegram_post(text, image_url):
         logger.error(f"Telegram send error: {e}")
         return False
 
+# ---------- главный цикл ----------
 def main():
     logger.info("=== Запуск бота ===")
     posted = load_posted_guids()
@@ -239,22 +247,25 @@ def main():
         image_url = extract_image(entry)
         description = entry.get("description", "")
         raw_text = extract_article_text(entry.link, fallback_description=description)
-
         if not raw_text:
             raw_text = title
 
-        # Очищаем текст от мусора
         cleaned_text = clean_text(raw_text, title=title)
         if not cleaned_text:
             cleaned_text = title
 
-        # Просим Gemini переписать
         edited = ai_rewrite(cleaned_text, image_url)
         if not edited:
-            # Fallback – берём очищенный текст (первые 800 символов)
-            edited = cleaned_text[:800]
-            if len(cleaned_text) > 800:
-                edited += "…"
+            # Умный fallback: обрезаем по последней точке в пределах 900 символов
+            if len(cleaned_text) <= 900:
+                edited = cleaned_text
+            else:
+                cut = cleaned_text[:900]
+                last_period = max(cut.rfind('.'), cut.rfind('!'), cut.rfind('?'))
+                if last_period > 400:
+                    edited = cleaned_text[:last_period+1]
+                else:
+                    edited = cut + "…"
 
         success = send_telegram_post(edited, image_url)
         if success:

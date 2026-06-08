@@ -88,7 +88,7 @@ def extract_image(entry):
         logger.warning(f"Could not fetch og:image for {entry.link}: {e}")
     return None
 
-# ---------- проверка мусорной строки (ВОЗВРАЩЕНА проверка на знаки препинания) ----------
+# ---------- проверка мусорной строки ----------
 def is_garbage_line(line):
     line = line.strip()
     if not line:
@@ -126,7 +126,7 @@ def is_garbage_line(line):
     if line.startswith('—') or line.startswith('- '):
         return True
 
-    # обрывки: начинается со знака препинания (запятая, точка, двоеточие и т.д.)
+    # обрывки: начинается со знака препинания
     if line and line[0] in ',.;:!?':
         return True
 
@@ -140,7 +140,6 @@ def is_garbage_line(line):
     words = line.split()
     if 1 <= len(words) <= 3 and all(len(w) < 20 for w in words):
         if not any(w[0].isdigit() for w in words):
-            # если нет глагольных окончаний – удаляем
             if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают', 'ил', 'ел', 'ет', 'ит', 'ут', 'ют')) for w in words):
                 return True
 
@@ -156,7 +155,6 @@ def clean_text(raw_text, title=""):
             continue
         if is_garbage_line(line):
             continue
-        # обрывок: начинается с маленькой буквы после завершённого предложения
         if line and line[0].islower() and prev_ended:
             continue
         if title and line.lower() == title.lower():
@@ -165,7 +163,7 @@ def clean_text(raw_text, title=""):
         prev_ended = line.endswith(('.', '!', '?'))
     return "\n".join(cleaned)
 
-# ---------- фильтрация тела: оставляем только содержательные строки ----------
+# ---------- фильтрация тела (ослабленная) ----------
 def has_verb(line):
     return any(w.endswith(('ет', 'ит', 'ут', 'ют', 'ал', 'ил', 'ел', 'ть', 'чь', 'ся', 'сь', 'ете', 'ают', 'яют', 'ует', 'ирует')) for w in line.split())
 
@@ -176,7 +174,7 @@ def filter_body_lines(text):
         line = line.strip()
         if not line:
             continue
-        if len(line) > 100:
+        if len(line) > 60:          # снижено с 100 для сохранения текста
             result.append(line)
         elif has_verb(line):
             result.append(line)
@@ -302,12 +300,29 @@ def main():
             if new_title:
                 title = new_title
 
-        # удаляем из тела дубликаты заголовка
-        cleaned_text = "\n".join([l for l in cleaned_text.splitlines() if l.lower() not in (original_title.lower(), title.lower())])
+        # удаляем из тела строки, начинающиеся с любого из заголовков
+        cleaned_lines = cleaned_text.splitlines()
+        filtered = []
+        for line in cleaned_lines:
+            if title and line.lower().startswith(title.lower()):
+                continue
+            if original_title and line.lower().startswith(original_title.lower()):
+                continue
+            filtered.append(line)
+        cleaned_text = "\n".join(filtered)
 
         # фильтрация тела – только важные строки
         body = filter_body_lines(cleaned_text)
         body = trim_text(body, 800) if body else ""
+
+        # если тело пустое – берём первую не мусорную строку из cleaned_text
+        if not body and cleaned_text:
+            for line in cleaned_text.splitlines():
+                if line and not is_garbage_line(line):
+                    body = line
+                    break
+            if body:
+                body = trim_text(body, 800)
 
         post = add_emoji_prefix(title)
         if body:

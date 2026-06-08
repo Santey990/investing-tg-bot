@@ -2,8 +2,10 @@ name: Auto-Investing-Bot
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/5 * * * *'   # (не будет работать в форке, но оставим для порядка)
   workflow_dispatch:
+  repository_dispatch:        # <- новый триггер для внешнего вызова
+    types: [run-bot]
 
 jobs:
   run-bot:

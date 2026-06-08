@@ -10,7 +10,7 @@ import google.generativeai as genai
 
 # --- Config ---
 RSS_URL = "https://ru.investing.com/rss/news.rss"
-TELEGRAM_TOKEN = os.environ["7752149029:AAEhPAMFliBCgSx2jFFDOT5XHchmn4dqcko"]
+TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["-1003795164458"]   # e.g. -1001234567890
 GEMINI_API_KEY = os.environ["AQ.Ab8RN6LCcva0AZCiitxYIk-L117YnfRXQ0sJpX2ASb65-EUtEg"]
 

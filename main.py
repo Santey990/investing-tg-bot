@@ -10,9 +10,9 @@ import google.generativeai as genai
 
 # --- Config ---
 RSS_URL = "https://ru.investing.com/rss/news.rss"
-TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]   # e.g. -1001234567890
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+TELEGRAM_TOKEN = os.environ["7752149029:AAEhPAMFliBCgSx2jFFDOT5XHchmn4dqcko"]
+CHANNEL_ID = os.environ["-1003795164458"]   # e.g. -1001234567890
+GEMINI_API_KEY = os.environ["AQ.Ab8RN6LCcva0AZCiitxYIk-L117YnfRXQ0sJpX2ASb65-EUtEg"]
 
 DATA_FILE = "posted_guids.json"
 MAX_ITEMS_PER_RUN = 5          # process up to 5 new posts each run
@@ -96,7 +96,7 @@ def extract_article_text(url):
 
 # --- 3. Rewrite with Gemini (free tier) ---
 def ai_rewrite(original_text, image_url=None):
-    genai.configure(api_key=GEMINI_API_KEY)
+    genai.configure(api_key=AQ.Ab8RN6LCcva0AZCiitxYIk-L117YnfRXQ0sJpX2ASb65-EUtEg)
     model = genai.GenerativeModel("gemini-1.5-flash")   # free, fast
 
     prompt = (

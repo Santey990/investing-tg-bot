@@ -23,9 +23,9 @@ CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 DATA_FILE = "posted_guids.json"
-RETRY_FILE = "retry_queue.json"      # файл для отложенных новостей
-MAX_RETRIES = 3                       # максимальное число повторных попыток
-MAX_ITEMS_PER_RUN = 3
+RETRY_FILE = "retry_queue.json"
+MAX_RETRIES = 3
+MAX_ITEMS_PER_RUN = 2
 LOG_FILE = "bot.log"
 
 logging.basicConfig(
@@ -109,7 +109,6 @@ def extract_image(entry):
     return None
 
 def extract_image_from_url(url):
-    """Извлекает картинку из URL (используется для отложенных новостей)."""
     try:
         page = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         soup = BeautifulSoup(page.text, "html.parser")
@@ -149,13 +148,13 @@ def extract_article_text(url, fallback=""):
         logger.warning(f"Article parse error: {e}")
     return fallback[:8000]
 
-# ==================== AI через OpenRouter (актуальные бесплатные модели, июнь 2026) ====================
+# ==================== AI через OpenRouter (только рабочие модели) ====================
 OPENROUTER_MODELS = [
-    "google/gemma-4-31b-it:free",
-    "nvidia/nemotron-3-super:free",
     "openai/gpt-oss-120b:free",
+    "google/gemma-4-31b-it:free",
     "z-ai/glm-4.5-air:free",
     "moonshotai/kimi-k2.6:free",
+    "nvidia/nemotron-3-nano-30b-a3b:free",
     "openrouter/free"
 ]
 
@@ -254,7 +253,6 @@ def save_retry_queue(queue):
         json.dump(queue, f, ensure_ascii=False, indent=2)
 
 def add_to_retry_queue(guid, entry_data):
-    """Добавляет новость в очередь повторных попыток."""
     queue = load_retry_queue()
     if guid in queue:
         queue[guid]["attempts"] += 1
@@ -297,9 +295,9 @@ def main():
     retry_queue = load_retry_queue()
     newly_posted_guids = set()
 
-    # ---------- 1. Обработка отложенных новостей из очереди ----------
+    # 1. Обработка отложенных новостей
     for guid, data in list(retry_queue.items()):
-        if guid in posted:      # уже опубликовано (защита от дублирования)
+        if guid in posted:
             del retry_queue[guid]
             continue
 
@@ -317,7 +315,6 @@ def main():
 
         rewritten = ai_rewrite(article)
         if rewritten:
-            # AI сработал – публикуем пересказ
             image = extract_image_from_url(link)
             if send_post(rewritten, image):
                 posted.add(guid)
@@ -325,9 +322,7 @@ def main():
                 del retry_queue[guid]
                 logger.info(f"Отложенная новость опубликована с пересказом: {title}")
         else:
-            # AI не сработал
             if attempts >= MAX_RETRIES:
-                # Превышено число попыток – публикуем fallback и удаляем из очереди
                 fallback_text = f"📈 {title}\n\n📢 Подписывайтесь: @Investing_24"
                 image = extract_image_from_url(link)
                 if send_post(fallback_text, image):
@@ -336,16 +331,14 @@ def main():
                     del retry_queue[guid]
                     logger.warning(f"Отложенная новость опубликована как fallback после {MAX_RETRIES} попыток: {title}")
             else:
-                # Оставляем в очереди, увеличиваем счётчик
                 retry_queue[guid]["attempts"] = attempts + 1
                 logger.info(f"Новость остаётся в очереди, попытка {attempts+1}/{MAX_RETRIES}")
 
         time.sleep(2)
 
-    # Сохраняем обновлённую очередь после обработки
     save_retry_queue(retry_queue)
 
-    # ---------- 2. Обычная обработка свежих новостей из RSS ----------
+    # 2. Обработка свежих новостей из RSS
     entries = get_all_entries()
     new_posts = 0
 
@@ -367,7 +360,6 @@ def main():
 
         rewritten = ai_rewrite(article)
         if rewritten:
-            # AI сработал – публикуем пересказ
             image = extract_image(entry)
             if send_post(rewritten, image):
                 posted.add(guid)
@@ -375,7 +367,6 @@ def main():
                 new_posts += 1
                 logger.info(f"Опубликовано: {title}")
         else:
-            # AI не сработал – добавляем новость в очередь повторных попыток
             add_to_retry_queue(guid, {
                 "title": title,
                 "link": entry.link,
@@ -386,7 +377,7 @@ def main():
 
         time.sleep(3)
 
-    # ---------- 3. Сохранение состояния ----------
+    # 3. Сохранение состояния
     if newly_posted_guids:
         updated_guids = posted.union(newly_posted_guids)
         save_posted_guids(updated_guids)

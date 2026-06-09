@@ -5,6 +5,7 @@ import cloudscraper
 from bs4 import BeautifulSoup
 from readability import Document
 from google import genai
+from google.genai import types
 
 RSS_URLS = [
     "https://1prime.ru/export/rss2/index.xml",
@@ -206,26 +207,38 @@ def add_emoji_prefix(text):
         return "💵 " + text
     return "🔹 " + text
 
-# ---------- ИИ-рерайт ----------
+# ---------- ИИ-рерайт с максимальной уникальностью ----------
 def ai_rewrite(original_text, image_url=None):
+    """Переписывает через Gemini, требуя 100% уникальности."""
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
+
+        # Усиленный промпт
         prompt = (
-            "Ты — редактор телеграм-канала об инвестициях и финансах.\n"
-            "Перепиши новость в яркий и лаконичный пост для Telegram.\n"
-            "Правила:\n"
-            "- Используй эмодзи (🔹, 📈, 💡 и т.п.)\n"
-            "- Сохрани ключевые цифры и факты\n"
-            "- Максимум 800 символов (включая эмодзи и пробелы)\n"
-            "- Не упоминай источник (ПРАЙМ, МОСКВА, РИА) и дату\n"
-            "- Не вставляй контактные данные\n"
-            "- Заверши пост призывом подписаться на канал @Investing_24 (не более одной строки)\n\n"
+            "Ты — редактор телеграм-канала. Полностью переделай эту новость так, "
+            "чтобы она отличалась от оригинала на 100% по стилю, лексике и построению предложений. "
+            "Используй совершенно другие формулировки, синонимы, измени порядок подачи фактов. "
+            "Ни одна фраза из исходного текста не должна повторяться дословно. "
+            "Сохрани только точные цифры и факты. "
+            "Добавь эмодзи, сделай пост ярким и лаконичным (до 800 символов). "
+            "Не упоминай источник и дату. "
+            "Закончи призывом подписаться на канал @Investing_24.\n\n"
             f"Исходная статья:\n{original_text}"
         )
+
+        # Высокая креативность
+        generation_config = types.GenerateContentConfig(
+            temperature=0.9,
+            top_p=0.95,
+            max_output_tokens=800,
+        )
+
         response = client.models.generate_content(
             model="models/gemini-1.5-flash",
             contents=prompt,
+            config=generation_config,
         )
+
         if response.text:
             logger.info("ИИ успешно переписал текст.")
             return response.text.strip()

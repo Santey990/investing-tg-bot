@@ -20,12 +20,10 @@ RSS_URLS = [
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
-# Gemini больше не используется, но переменная может остаться (не обязательна)
-# GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")   # <-- добавьте этот секрет
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 DATA_FILE = "posted_guids.json"
-MAX_ITEMS_PER_RUN = 5
+MAX_ITEMS_PER_RUN = 3          # можно уменьшить до 2 для большей надёжности
 LOG_FILE = "bot.log"
 
 logging.basicConfig(
@@ -38,7 +36,6 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
-
 scraper = cloudscraper.create_scraper()
 
 # ==================== GUID ====================
@@ -65,11 +62,7 @@ def make_guid(entry):
 # ==================== RSS ====================
 def fetch_rss(url):
     try:
-        r = requests.get(
-            url,
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=20
-        )
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
         r.raise_for_status()
         return r.content
     except Exception as e:
@@ -104,11 +97,7 @@ def extract_image(entry):
     except:
         pass
     try:
-        page = requests.get(
-            entry.link,
-            timeout=15,
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
+        page = requests.get(entry.link, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         soup = BeautifulSoup(page.text, "html.parser")
         og = soup.find("meta", property="og:image")
         if og:
@@ -126,9 +115,7 @@ def clean_text(text):
             continue
         if len(line) < 20:
             continue
-        if "ria.ru" in line.lower():
-            continue
-        if "прайм" in line.lower():
+        if "ria.ru" in line.lower() or "прайм" in line.lower():
             continue
         lines.append(line)
     return "\n".join(lines)
@@ -148,42 +135,28 @@ def extract_article_text(url, fallback=""):
         logger.warning(f"Article parse error: {e}")
     return fallback[:8000]
 
-# ==================== AI через OpenRouter (бесплатно) ====================
-OPENROUTER_MODEL = "google/gemma-4-26b-a4b-it:free"   # Бесплатная модель
+# ==================== AI ЧЕРЕЗ OPENROUTER (УЛУЧШЕННАЯ) ====================
+OPENROUTER_MODEL = "mistralai/mistral-7b-instruct:free"   # надёжная бесплатная модель
 
 def ai_rewrite(text):
-    """
-    Отправляет текст в OpenRouter (бесплатные модели). 
-    Возвращает переписанный текст или None в случае ошибки.
-    """
     if not OPENROUTER_API_KEY:
-        logger.warning("OPENROUTER_API_KEY не задан. AI недоступен.")
+        logger.warning("OPENROUTER_API_KEY не задан, AI недоступен")
         return None
 
-    prompt = f"""
-Ты финансовый редактор Telegram-канала Investing-24.
-
-Полностью перепиши новость.
+    prompt = f"""Ты финансовый редактор Telegram-канала Investing-24. Полностью перепиши новость.
 
 Требования:
-
-- Новый стиль изложения
-- Не копируй оригинальные предложения
+- Новый стиль изложения, не копируй оригинал
 - Сохрани факты и цифры
 - Добавь подходящие эмодзи
 - До 800 символов
 - Без упоминания источника
-- В конце добавь:
+- В конце добавь: 📢 Подписывайтесь: @Investing_24
 
-📢 Подписывайтесь: @Investing_24
+Текст новости:
+{text}"""
 
-Текст:
-
-{text}
-"""
-
-    max_attempts = 3
-    for attempt in range(1, max_attempts + 1):
+    for attempt in range(1, 4):
         try:
             response = requests.post(
                 url="https://openrouter.ai/api/v1/chat/completions",
@@ -197,25 +170,28 @@ def ai_rewrite(text):
                     "max_tokens": 800,
                     "temperature": 0.7,
                 },
-                timeout=30,
+                timeout=45,
             )
             if response.status_code == 200:
-                result = response.json()
-                rewritten = result["choices"][0]["message"]["content"].strip()
-                if rewritten:
-                    return rewritten
+                data = response.json()
+                if "choices" in data and data["choices"]:
+                    content = data["choices"][0]["message"]["content"].strip()
+                    if content:
+                        return content
+                    else:
+                        logger.warning(f"Пустой ответ от OpenRouter (попытка {attempt})")
                 else:
-                    logger.warning(f"OpenRouter вернул пустой ответ, попытка {attempt}")
+                    logger.warning(f"Неожиданный формат ответа: {data}")
             elif response.status_code == 429:
-                # Превышение лимита – ждём и повторяем
-                logger.warning(f"OpenRouter rate limit (попытка {attempt}), ждём 10 сек")
-                time.sleep(10)
+                logger.warning(f"Превышен лимит OpenRouter, ждём 15 сек (попытка {attempt})")
+                time.sleep(15)
             else:
-                logger.error(f"OpenRouter ошибка {response.status_code}: {response.text}")
-                break   # при других ошибках не повторяем
+                logger.error(f"OpenRouter ошибка {response.status_code}: {response.text[:200]}")
+                if attempt == 3:
+                    return None
         except Exception as e:
             logger.error(f"OpenRouter исключение: {e}")
-            time.sleep(2 ** attempt)   # экспоненциальная задержка
+            time.sleep(2 ** attempt)
     return None
 
 # ==================== TELEGRAM ====================
@@ -225,21 +201,13 @@ def send_post(text, image_url=None):
         if image_url:
             result = requests.post(
                 f"{base}/sendPhoto",
-                data={
-                    "chat_id": CHANNEL_ID,
-                    "photo": image_url,
-                    "caption": text[:1024]
-                },
+                data={"chat_id": CHANNEL_ID, "photo": image_url, "caption": text[:1024]},
                 timeout=30
             )
         else:
             result = requests.post(
                 f"{base}/sendMessage",
-                data={
-                    "chat_id": CHANNEL_ID,
-                    "text": text,
-                    "disable_web_page_preview": True
-                },
+                data={"chat_id": CHANNEL_ID, "text": text, "disable_web_page_preview": True},
                 timeout=30
             )
         result.raise_for_status()
@@ -254,7 +222,7 @@ def main():
     posted = load_posted_guids()
     entries = get_all_entries()
     new_posts = 0
-    newly_posted_guids = set()   # для сохранения один раз в конце
+    newly_posted_guids = set()
 
     for entry in entries:
         guid = make_guid(entry)
@@ -272,10 +240,10 @@ def main():
         if not article:
             article = title
 
-        # Пытаемся использовать AI (OpenRouter)
         rewritten = ai_rewrite(article)
         if not rewritten:
-            rewritten = f"📈 {title}\n\n📢 @Investing_24"
+            rewritten = f"📈 {title}\n\n📢 Подписывайтесь: @Investing_24"
+            logger.warning(f"AI не сработал, использован fallback для: {title}")
 
         image = extract_image(entry)
 
@@ -285,7 +253,6 @@ def main():
             logger.info(f"Опубликовано: {title}")
             time.sleep(3)
 
-    # Сохраняем новые GUID один раз (если были публикации)
     if newly_posted_guids:
         updated_guids = posted.union(newly_posted_guids)
         save_posted_guids(updated_guids)

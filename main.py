@@ -104,7 +104,7 @@ def extract_image(entry):
         logger.warning(f"Не удалось извлечь изображение: {e}")
     return None
 
-# ---------- мусорная строка (без изменений) ----------
+# ---------- мусорная строка ----------
 def is_garbage_line(line):
     line = line.strip()
     if not line:
@@ -207,10 +207,11 @@ def add_emoji_prefix(text):
         return "💵 " + text
     return "🔹 " + text
 
-# ---------- ИИ-рерайт (ИСПРАВЛЕННАЯ МОДЕЛЬ) ----------
+# ---------- ИИ-рерайт (исправлен: api_version='v1', модель gemini-1.5-flash) ----------
 def ai_rewrite(original_text, image_url=None):
     try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
+        # Явно указываем версию API, которая работает с бесплатными ключами
+        client = genai.Client(api_key=GEMINI_API_KEY, api_version='v1')
         prompt = (
             "Ты — редактор телеграм-канала. Полностью переработай эту новость так, "
             "чтобы она отличалась от оригинала на 100% по стилю, лексике и построению предложений. "
@@ -228,7 +229,7 @@ def ai_rewrite(original_text, image_url=None):
             max_output_tokens=800,
         )
         response = client.models.generate_content(
-            model="models/gemini-2.0-flash-exp",   # РАБОЧАЯ БЕСПЛАТНАЯ МОДЕЛЬ
+            model="models/gemini-1.5-flash",   # стабильная бесплатная модель
             contents=prompt,
             config=config,
         )

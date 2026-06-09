@@ -23,7 +23,7 @@ CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 DATA_FILE = "posted_guids.json"
-MAX_ITEMS_PER_RUN = 2        # 2 поста за запуск
+MAX_ITEMS_PER_RUN = 2
 LOG_FILE = "bot.log"
 
 logging.basicConfig(
@@ -135,8 +135,7 @@ def extract_article_text(url, fallback=""):
         logger.warning(f"Article parse error: {e}")
     return fallback[:8000]
 
-# ==================== AI через OpenRouter (автоматическое переключение) ====================
-# Только проверенные рабочие бесплатные модели
+# ==================== AI через OpenRouter (с повторными попытками при None) ====================
 OPENROUTER_MODELS = [
     "nvidia/nemotron-3-nano-30b-a3b:free",
     "meta-llama/llama-3.2-3b-instruct:free",
@@ -162,55 +161,63 @@ def ai_rewrite(text):
 {text}"""
 
     for model_name in OPENROUTER_MODELS:
-        try:
-            response = requests.post(
-                url="https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model_name,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 800,
-                    "temperature": 0.7,
-                },
-                timeout=45,
-            )
+        for attempt in range(1, 3):  # 2 попытки на модель (повтор при None)
+            try:
+                response = requests.post(
+                    url="https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model_name,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 800,
+                        "temperature": 0.7,
+                    },
+                    timeout=60,
+                )
 
-            if response.status_code == 200:
-                data = response.json()
-                # Безопасное извлечение текста
-                try:
-                    content = data["choices"][0]["message"]["content"]
-                    if content and isinstance(content, str):
-                        content = content.strip()
-                        if content:
-                            logger.info(f"✅ Успешно использована модель: {model_name}")
-                            return content
+                if response.status_code == 200:
+                    data = response.json()
+                    try:
+                        content = data["choices"][0]["message"]["content"]
+                        if content and isinstance(content, str):
+                            content = content.strip()
+                            if content:
+                                logger.info(f"✅ Успешно использована модель: {model_name}")
+                                return content
+                            else:
+                                logger.warning(f"⚠️ Модель {model_name} вернула пустой текст (попытка {attempt})")
                         else:
-                            logger.warning(f"⚠️ Модель {model_name} вернула пустой текст")
+                            logger.warning(f"⚠️ Модель {model_name} вернула нестроковое значение: {content} (попытка {attempt})")
+                    except (KeyError, IndexError, TypeError) as e:
+                        logger.warning(f"⚠️ Модель {model_name} вернула неожиданный формат: {e} (попытка {attempt})")
+                    # Если пустой ответ или ошибка формата, делаем повторную попытку
+                    if attempt == 1:
+                        time.sleep(3)
+                        continue
                     else:
-                        logger.warning(f"⚠️ Модель {model_name} вернула нестроковое значение: {content}")
-                except (KeyError, IndexError, TypeError) as e:
-                    logger.warning(f"⚠️ Модель {model_name} вернула неожиданный формат: {e} - {data}")
-                # Если не удалось извлечь контент, пробуем следующую модель
-                continue
+                        break  # переходим к следующей модели
 
-            elif response.status_code == 429:
-                logger.warning(f"⏳ Модель {model_name} превысила лимит (429), пробуем следующую...")
-                time.sleep(5)
-                continue
-            elif response.status_code == 404:
-                logger.warning(f"❌ Модель {model_name} не найдена (404), пробуем следующую...")
-                continue
-            else:
-                logger.error(f"❌ Ошибка {response.status_code} для модели {model_name}: {response.text[:200]}")
-                continue
+                elif response.status_code == 429:
+                    logger.warning(f"⏳ Модель {model_name} превысила лимит (429), пробуем следующую...")
+                    time.sleep(5)
+                    break  # переходим к следующей модели
+                elif response.status_code == 404:
+                    logger.warning(f"❌ Модель {model_name} не найдена (404), пробуем следующую...")
+                    break
+                else:
+                    logger.error(f"❌ Ошибка {response.status_code} для модели {model_name}: {response.text[:200]}")
+                    break
 
-        except Exception as e:
-            logger.error(f"❌ Исключение для модели {model_name}: {e}")
-            continue
+            except Exception as e:
+                logger.error(f"❌ Исключение для модели {model_name} (попытка {attempt}): {e}")
+                if attempt == 1:
+                    time.sleep(3)
+                    continue
+                else:
+                    break
 
     logger.error("❌ Все модели из списка недоступны, используем fallback.")
     return None

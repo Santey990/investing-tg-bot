@@ -4,10 +4,15 @@ import requests
 import cloudscraper
 from bs4 import BeautifulSoup
 from readability import Document
+from google import genai
 
-RSS_URL = "https://1prime.ru/export/rss2/index.xml"
+RSS_URLS = [
+    "https://1prime.ru/export/rss2/index.xml",
+]
+
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 DATA_FILE = "posted_guids.json"
 MAX_ITEMS_PER_RUN = 5
@@ -36,21 +41,18 @@ def load_posted_guids():
         return set()
     try:
         data = json.loads(raw)
-        return set(data[-1000:])          # храним последние 1000, чтобы не рос бесконечно
+        return set(data[-1000:])
     except json.JSONDecodeError:
         logger.error("Ошибка в JSON, сбрасываю список.")
         return set()
 
 def save_posted_guids(guids):
-    """Сохраняет множество GUID в файл (гарантированно перезаписывает)."""
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(list(guids), f)
 
 def make_guid(entry):
-    """Генерирует уникальный идентификатор для записи RSS."""
     if hasattr(entry, "id") and entry.id:
         return entry.id
-    # иначе строим хэш от ссылки + заголовка (стабильный)
     raw = entry.link + entry.get("title", "")
     return hashlib.md5(raw.encode()).hexdigest()
 
@@ -62,18 +64,22 @@ def fetch_rss(url):
         resp.raise_for_status()
         return resp.content
     except Exception as e:
-        logger.error(f"Не удалось скачать RSS: {e}")
+        logger.error(f"Не удалось скачать RSS {url}: {e}")
         return None
 
-def get_feed_entries():
-    content = fetch_rss(RSS_URL)
-    if content is None:
-        return []
-    feed = feedparser.parse(content)
-    if feed.bozo:
-        logger.error(f"Ошибка парсинга RSS: {feed.bozo_exception}")
-    logger.info(f"В ленте {len(feed.entries)} новостей.")
-    return feed.entries
+def get_all_entries():
+    all_entries = []
+    for url in RSS_URLS:
+        content = fetch_rss(url)
+        if content is None:
+            continue
+        feed = feedparser.parse(content)
+        if feed.bozo:
+            logger.error(f"Ошибка парсинга RSS {url}: {feed.bozo_exception}")
+        logger.info(f"Лента {url} содержит {len(feed.entries)} новостей.")
+        for entry in feed.entries:
+            all_entries.append((entry, url))
+    return all_entries
 
 # ---------- изображение ----------
 def extract_image(entry):
@@ -102,18 +108,14 @@ def is_garbage_line(line):
     line = line.strip()
     if not line:
         return True
-
     if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', line):
         return True
     if re.search(r'(\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{2,4}[-.\s]?\d{2,4}', line):
         return True
-
     if re.search(r'ФГУП|МИА|Россия сегодня|internet-group|РИА Новости|ПРАЙМ', line, re.IGNORECASE):
         return True
-
     if re.search(r'\d{1,2}\s+\w+|\d{4}', line) and re.search(r'МОСКВА|ПРАЙМ', line, re.IGNORECASE):
         return True
-
     if re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{4}', line):
         return True
     if re.fullmatch(r'\d{2}\.\d{2}\.\d{4}', line):
@@ -122,26 +124,21 @@ def is_garbage_line(line):
         return True
     if re.fullmatch(r'\d{4}', line):
         return True
-
     if re.match(r'https?://\S+', line):
         return True
-
     if line.startswith('—') or line.startswith('- '):
         return True
     if line and line[0] in ',.;:!?':
         return True
-
     parts = [p.strip() for p in line.split(',') if p.strip()]
     if len(parts) >= 2 and all(len(w) < 25 for w in parts):
         if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают', 'ил', 'ел', 'ет', 'ит', 'ут', 'ют')) for w in parts):
             return True
-
     words = line.split()
     if 1 <= len(words) <= 3 and all(len(w) < 20 for w in words):
         if not any(w[0].isdigit() for w in words):
             if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают', 'ил', 'ел', 'ет', 'ит', 'ут', 'ют')) for w in words):
                 return True
-
     return False
 
 def clean_text(raw_text, title=""):
@@ -190,7 +187,6 @@ def extract_article_text(url, fallback_description=""):
             return text[:9000]
     except Exception as e:
         logger.warning(f"Ошибка cloudscraper: {e}")
-
     if fallback_description and len(fallback_description.strip()) > 30:
         logger.info("Использую описание из RSS.")
         return fallback_description.strip()[:9000]
@@ -209,6 +205,36 @@ def add_emoji_prefix(text):
     if any(w in lower for w in ['доллар', 'валюта', 'рубл']):
         return "💵 " + text
     return "🔹 " + text
+
+# ---------- ИИ-рерайт ----------
+def ai_rewrite(original_text, image_url=None):
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        prompt = (
+            "Ты — редактор телеграм-канала об инвестициях и финансах.\n"
+            "Перепиши новость в яркий и лаконичный пост для Telegram.\n"
+            "Правила:\n"
+            "- Используй эмодзи (🔹, 📈, 💡 и т.п.)\n"
+            "- Сохрани ключевые цифры и факты\n"
+            "- Максимум 800 символов (включая эмодзи и пробелы)\n"
+            "- Не упоминай источник (ПРАЙМ, МОСКВА, РИА) и дату\n"
+            "- Не вставляй контактные данные\n"
+            "- Заверши пост призывом подписаться на канал @Investing_24 (не более одной строки)\n\n"
+            f"Исходная статья:\n{original_text}"
+        )
+        response = client.models.generate_content(
+            model="models/gemini-1.5-flash",
+            contents=prompt,
+        )
+        if response.text:
+            logger.info("ИИ успешно переписал текст.")
+            return response.text.strip()
+        else:
+            logger.error("Gemini вернул пустой ответ.")
+            return None
+    except Exception as e:
+        logger.error(f"Ошибка Gemini API: {e}")
+        return None
 
 def send_telegram_post(text, image_url):
     base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
@@ -246,15 +272,15 @@ def trim_text(text, max_len=900):
 def main():
     logger.info("=== Запуск бота ===")
     posted = load_posted_guids()
-    entries = get_feed_entries()
-    if not entries:
-        logger.warning("Нет новостей. Выход.")
+    all_entries = get_all_entries()
+    if not all_entries:
+        logger.warning("Новостей нет. Выход.")
         return
 
-    logger.info(f"Новостей в ленте: {len(entries)}, уже обработано: {len(posted)}.")
+    logger.info(f"Всего записей из {len(RSS_URLS)} лент: {len(all_entries)}, уже обработано: {len(posted)}.")
     new_items = 0
 
-    for entry in entries:
+    for entry, rss_url in all_entries:
         guid = make_guid(entry)
         if guid in posted:
             continue
@@ -262,7 +288,7 @@ def main():
             break
 
         original_title = entry.get("title", "")
-        logger.info(f"Обрабатываю: {original_title}")
+        logger.info(f"Обрабатываю ({rss_url}): {original_title}")
 
         image_url = extract_image(entry)
         description = entry.get("description", "")
@@ -297,28 +323,30 @@ def main():
             filtered.append(line)
         cleaned_text = "\n".join(filtered)
 
-        body = filter_body_lines(cleaned_text)
-        body = trim_text(body, 800) if body else ""
+        rewritten = ai_rewrite(cleaned_text, image_url)
 
-        if not body and cleaned_text:
-            for line in cleaned_text.splitlines():
-                if line and not is_garbage_line(line):
-                    body = line
-                    break
+        if rewritten:
+            post = rewritten
+        else:
+            body = filter_body_lines(cleaned_text)
+            body = trim_text(body, 800) if body else ""
+            if not body and cleaned_text:
+                for line in cleaned_text.splitlines():
+                    if line and not is_garbage_line(line):
+                        body = line
+                        break
+                if body:
+                    body = trim_text(body, 800)
+            post = add_emoji_prefix(title)
             if body:
-                body = trim_text(body, 800)
-
-        post = add_emoji_prefix(title)
-        if body:
-            post += "\n\n" + body
-        if "@Investing_24" not in post:
-            post += "\n\nПодпишись на канал @Investing_24"
+                post += "\n\n" + body
+            if "@Investing_24" not in post:
+                post += "\n\nПодпишись на канал @Investing_24"
 
         success = send_telegram_post(post, image_url)
         if success:
             posted.add(guid)
             new_items += 1
-            # ----- ВАЖНО: сохраняем сразу после успешной отправки -----
             save_posted_guids(posted)
             logger.info(f"GUID {guid} сохранён. Всего обработано: {len(posted)}.")
             time.sleep(2)

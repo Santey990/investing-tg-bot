@@ -136,7 +136,7 @@ def extract_article_text(url, fallback=""):
     return fallback[:8000]
 
 # ==================== AI через OpenRouter ====================
-OPENROUTER_MODEL = "google/gemma-2-9b-it:free"   # рабочая бесплатная модель
+OPENROUTER_MODEL = "microsoft/phi-3-mini-128k-instruct:free"   # рабочая бесплатная модель
 
 def ai_rewrite(text):
     if not OPENROUTER_API_KEY:

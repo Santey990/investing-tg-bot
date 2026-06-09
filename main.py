@@ -13,18 +13,19 @@ import cloudscraper
 from bs4 import BeautifulSoup
 from readability import Document
 
-from google import genai
-
+# ==================== CONFIG ====================
 RSS_URLS = [
     "https://1prime.ru/export/rss2/index.xml"
 ]
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+# Gemini больше не используется, но переменная может остаться (не обязательна)
+# GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")   # <-- добавьте этот секрет
 
 DATA_FILE = "posted_guids.json"
-MAX_ITEMS_PER_RUN = 3
+MAX_ITEMS_PER_RUN = 5
 LOG_FILE = "bot.log"
 
 logging.basicConfig(
@@ -40,36 +41,28 @@ logger = logging.getLogger(__name__)
 
 scraper = cloudscraper.create_scraper()
 
-
-# ---------------- GUID ----------------
-
+# ==================== GUID ====================
 def load_posted_guids():
     if not os.path.exists(DATA_FILE):
         return set()
-
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             return set(json.load(f))
     except Exception:
         return set()
 
-
 def save_posted_guids(guids):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(list(guids), f, ensure_ascii=False)
 
-
 def make_guid(entry):
     if getattr(entry, "id", None):
         return entry.id
-
     return hashlib.md5(
         (entry.link + entry.get("title", "")).encode("utf-8")
     ).hexdigest()
 
-
-# ---------------- RSS ----------------
-
+# ==================== RSS ====================
 def fetch_rss(url):
     try:
         r = requests.get(
@@ -83,30 +76,19 @@ def fetch_rss(url):
         logger.error(f"RSS error: {e}")
         return None
 
-
 def get_all_entries():
     entries = []
-
     for url in RSS_URLS:
         content = fetch_rss(url)
-
         if not content:
             continue
-
         feed = feedparser.parse(content)
-
-        logger.info(
-            f"Получено {len(feed.entries)} записей из {url}"
-        )
-
+        logger.info(f"Получено {len(feed.entries)} записей из {url}")
         for item in feed.entries:
             entries.append(item)
-
     return entries
 
-
-# ---------------- IMAGE ----------------
-
+# ==================== IMAGE ====================
 def extract_image(entry):
     try:
         if hasattr(entry, "enclosures"):
@@ -115,100 +97,70 @@ def extract_image(entry):
                     return enc.href
     except:
         pass
-
     try:
         if hasattr(entry, "media_content"):
             for media in entry.media_content:
                 return media.get("url")
     except:
         pass
-
     try:
         page = requests.get(
             entry.link,
             timeout=15,
             headers={"User-Agent": "Mozilla/5.0"}
         )
-
         soup = BeautifulSoup(page.text, "html.parser")
-
         og = soup.find("meta", property="og:image")
-
         if og:
             return og.get("content")
     except:
         pass
-
     return None
 
-
-# ---------------- CLEAN ----------------
-
+# ==================== CLEAN ====================
 def clean_text(text):
     lines = []
-
     for line in text.splitlines():
-
         line = line.strip()
-
         if not line:
             continue
-
         if len(line) < 20:
             continue
-
         if "ria.ru" in line.lower():
             continue
-
         if "прайм" in line.lower():
             continue
-
         lines.append(line)
-
     return "\n".join(lines)
 
-
-# ---------------- ARTICLE ----------------
-
+# ==================== ARTICLE ====================
 def extract_article_text(url, fallback=""):
     try:
         response = scraper.get(url, timeout=20)
-
         doc = Document(response.text)
-
-        soup = BeautifulSoup(
-            doc.summary(),
-            "html.parser"
-        )
-
-        for tag in soup(
-            ["script", "style", "img", "figure"]
-        ):
+        soup = BeautifulSoup(doc.summary(), "html.parser")
+        for tag in soup(["script", "style", "img", "figure"]):
             tag.decompose()
-
-        text = soup.get_text(
-            separator="\n",
-            strip=True
-        )
-
+        text = soup.get_text(separator="\n", strip=True)
         if len(text) > 200:
             return text[:8000]
-
     except Exception as e:
         logger.warning(f"Article parse error: {e}")
-
     return fallback[:8000]
 
-
-# ---------------- GEMINI ----------------
+# ==================== AI через OpenRouter (бесплатно) ====================
+OPENROUTER_MODEL = "google/gemma-4-26b-a4b-it:free"   # Бесплатная модель
 
 def ai_rewrite(text):
-    try:
-        client = genai.Client(
-            api_key=GEMINI_API_KEY
-        )
+    """
+    Отправляет текст в OpenRouter (бесплатные модели). 
+    Возвращает переписанный текст или None в случае ошибки.
+    """
+    if not OPENROUTER_API_KEY:
+        logger.warning("OPENROUTER_API_KEY не задан. AI недоступен.")
+        return None
 
-        prompt = f"""
+    prompt = f"""
 Ты финансовый редактор Telegram-канала Investing-24.
 
 Полностью перепиши новость.
@@ -230,30 +182,47 @@ def ai_rewrite(text):
 {text}
 """
 
-        response = client.models.generate_content(
-            model="gemini-2.0-flash-lite",
-            contents=prompt
-        )
-
-        if response.text:
-            return response.text.strip()
-
-    except Exception as e:
-        logger.error(f"Gemini error: {e}")
-
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = requests.post(
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": OPENROUTER_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 800,
+                    "temperature": 0.7,
+                },
+                timeout=30,
+            )
+            if response.status_code == 200:
+                result = response.json()
+                rewritten = result["choices"][0]["message"]["content"].strip()
+                if rewritten:
+                    return rewritten
+                else:
+                    logger.warning(f"OpenRouter вернул пустой ответ, попытка {attempt}")
+            elif response.status_code == 429:
+                # Превышение лимита – ждём и повторяем
+                logger.warning(f"OpenRouter rate limit (попытка {attempt}), ждём 10 сек")
+                time.sleep(10)
+            else:
+                logger.error(f"OpenRouter ошибка {response.status_code}: {response.text}")
+                break   # при других ошибках не повторяем
+        except Exception as e:
+            logger.error(f"OpenRouter исключение: {e}")
+            time.sleep(2 ** attempt)   # экспоненциальная задержка
     return None
 
-
-# ---------------- TELEGRAM ----------------
-
+# ==================== TELEGRAM ====================
 def send_post(text, image_url=None):
-
     base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-
     try:
-
         if image_url:
-
             result = requests.post(
                 f"{base}/sendPhoto",
                 data={
@@ -263,9 +232,7 @@ def send_post(text, image_url=None):
                 },
                 timeout=30
             )
-
         else:
-
             result = requests.post(
                 f"{base}/sendMessage",
                 data={
@@ -275,84 +242,56 @@ def send_post(text, image_url=None):
                 },
                 timeout=30
             )
-
         result.raise_for_status()
-
         return True
-
     except Exception as e:
-
         logger.error(f"Telegram error: {e}")
-
         return False
 
-
-# ---------------- MAIN ----------------
-
+# ==================== MAIN ====================
 def main():
-
     logger.info("=== START ===")
-
     posted = load_posted_guids()
-
     entries = get_all_entries()
-
     new_posts = 0
+    newly_posted_guids = set()   # для сохранения один раз в конце
 
     for entry in entries:
-
         guid = make_guid(entry)
-
         if guid in posted:
             continue
-
         if new_posts >= MAX_ITEMS_PER_RUN:
             break
 
         title = entry.get("title", "")
-
         logger.info(f"Новость: {title}")
 
-        description = entry.get(
-            "description",
-            ""
-        )
-
-        article = extract_article_text(
-            entry.link,
-            description
-        )
-
+        description = entry.get("description", "")
+        article = extract_article_text(entry.link, description)
         article = clean_text(article)
-
         if not article:
             article = title
 
+        # Пытаемся использовать AI (OpenRouter)
         rewritten = ai_rewrite(article)
-
         if not rewritten:
-            rewritten = f"📈 {title}\n\n📢 Подписывайтесь: @Investing_24"
+            rewritten = f"📈 {title}\n\n📢 @Investing_24"
 
         image = extract_image(entry)
 
         if send_post(rewritten, image):
-
-            posted.add(guid)
-
-            save_posted_guids(posted)
-
+            newly_posted_guids.add(guid)
             new_posts += 1
-
-            logger.info(
-                f"Опубликовано: {title}"
-            )
-
+            logger.info(f"Опубликовано: {title}")
             time.sleep(3)
 
-    logger.info(
-        f"Готово. Добавлено {new_posts} постов."
-    )
+    # Сохраняем новые GUID один раз (если были публикации)
+    if newly_posted_guids:
+        updated_guids = posted.union(newly_posted_guids)
+        save_posted_guids(updated_guids)
+        logger.info(f"Сохранено {len(newly_posted_guids)} новых GUID")
 
+    logger.info(f"Готово. Добавлено {new_posts} постов.")
 
 if __name__ == "__main__":
     main()

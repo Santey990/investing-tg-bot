@@ -20,7 +20,7 @@ RSS_URLS = [
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")   # используем OpenRouter
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 DATA_FILE = "posted_guids.json"
 MAX_ITEMS_PER_RUN = 2        # 2 поста за запуск
@@ -135,8 +135,16 @@ def extract_article_text(url, fallback=""):
         logger.warning(f"Article parse error: {e}")
     return fallback[:8000]
 
-# ==================== AI через OpenRouter ====================
-OPENROUTER_MODEL = "microsoft/phi-3-mini-128k-instruct:free"   # рабочая бесплатная модель
+# ==================== AI через OpenRouter (с автоматическим переключением моделей) ====================
+# Список моделей в порядке приоритета. Бот будет перебирать их при ошибках 404/429.
+OPENROUTER_MODELS = [
+    "microsoft/phi-3-mini-128k-instruct:free",
+    "google/gemma-2-9b-it:free",
+    "meta-llama/llama-3.2-3b-instruct:free",
+    "mistralai/mistral-7b-instruct:free",
+    "qwen/qwen3-next-80b-a3b-instruct:free",
+    "nvidia/nemotron-3-nano-30b-a3b:free"
+]
 
 def ai_rewrite(text):
     if not OPENROUTER_API_KEY:
@@ -156,7 +164,8 @@ def ai_rewrite(text):
 Текст новости:
 {text}"""
 
-    for attempt in range(1, 4):
+    # Перебираем модели из списка
+    for model_name in OPENROUTER_MODELS:
         try:
             response = requests.post(
                 url="https://openrouter.ai/api/v1/chat/completions",
@@ -165,32 +174,39 @@ def ai_rewrite(text):
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": OPENROUTER_MODEL,
+                    "model": model_name,
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 800,
                     "temperature": 0.7,
                 },
                 timeout=45,
             )
+
             if response.status_code == 200:
                 data = response.json()
                 content = data["choices"][0]["message"]["content"].strip()
                 if content:
+                    logger.info(f"✅ Успешно использована модель: {model_name}")
                     return content
                 else:
-                    logger.warning(f"OpenRouter вернул пустой ответ (попытка {attempt})")
+                    logger.warning(f"⚠️ Модель {model_name} вернула пустой ответ")
             elif response.status_code == 429:
-                wait = 30
-                logger.warning(f"Лимит OpenRouter (попытка {attempt}), ждём {wait} сек")
-                time.sleep(wait)
-            else:
-                logger.error(f"OpenRouter ошибка {response.status_code}: {response.text[:200]}")
-                if attempt == 3:
-                    return None
+                logger.warning(f"⏳ Модель {model_name} превысила лимит (429), пробуем следующую...")
                 time.sleep(5)
+                continue
+            elif response.status_code == 404:
+                logger.warning(f"❌ Модель {model_name} не найдена (404), пробуем следующую...")
+                continue
+            else:
+                logger.error(f"❌ Ошибка {response.status_code} для модели {model_name}: {response.text[:200]}")
+                continue
+
         except Exception as e:
-            logger.error(f"OpenRouter исключение: {e}")
-            time.sleep(2 ** attempt)
+            logger.error(f"❌ Исключение для модели {model_name}: {e}")
+            continue
+
+    # Если ни одна модель не сработала
+    logger.error("❌ Все модели из списка недоступны, используем fallback.")
     return None
 
 # ==================== TELEGRAM ====================

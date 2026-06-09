@@ -104,7 +104,7 @@ def extract_image(entry):
         logger.warning(f"Не удалось извлечь изображение: {e}")
     return None
 
-# ---------- мусорная строка ----------
+# ---------- мусорная строка (без изменений) ----------
 def is_garbage_line(line):
     line = line.strip()
     if not line:
@@ -207,56 +207,40 @@ def add_emoji_prefix(text):
         return "💵 " + text
     return "🔹 " + text
 
-# ---------- ИИ-рерайт с повторами ----------
+# ---------- ИИ-рерайт (ИСПРАВЛЕННАЯ МОДЕЛЬ) ----------
 def ai_rewrite(original_text, image_url=None):
-    """Пытается переписать через Gemini до 3 попыток с разными настройками."""
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    prompts = [
-        # Попытка 1: креативный рерайт
-        "Ты — редактор телеграм-канала. Полностью переработай эту новость так, "
-        "чтобы она отличалась от оригинала на 100% по стилю, лексике и построению предложений. "
-        "Используй совершенно другие формулировки, синонимы, измени порядок подачи фактов. "
-        "Ни одна фраза из исходного текста не должна повторяться дословно. "
-        "Сохрани только точные цифры и факты. "
-        "Добавь эмодзи, сделай пост ярким и лаконичным (до 800 символов). "
-        "Не упоминай источник и дату. "
-        "Закончи призывом подписаться на канал @Investing_24.\n\n"
-        f"Исходная статья:\n{original_text}",
-        # Попытка 2: то же, но строже
-        "Как редактор, перепиши текст полностью, измени каждое предложение, "
-        "замени все слова на синонимы, перестрой структуру. Сохрани цифры. "
-        "Максимум 800 символов с эмодзи. Подпишись: @Investing_24.\n\n"
-        f"Статья:\n{original_text}",
-        # Попытка 3: ещё строже
-        "Сделай уникальный рерайт новости для Telegram. Не копируй исходные фразы. "
-        "Используй другие обороты, другую грамматику. Добавь эмодзи. "
-        "Лимит 800 символов. Призыв: @Investing_24.\n\n"
-        f"Оригинал:\n{original_text}"
-    ]
-
-    for i, prompt in enumerate(prompts, 1):
-        try:
-            config = types.GenerateContentConfig(
-                temperature=0.9,
-                top_p=0.95,
-                max_output_tokens=800,
-            )
-            logger.info(f"Попытка {i} запроса к Gemini...")
-            response = client.models.generate_content(
-                model="models/gemini-1.5-pro",
-                contents=prompt,
-                config=config,
-            )
-            if response.text:
-                logger.info(f"Gemini ответил (попытка {i}).")
-                return response.text.strip()
-            else:
-                logger.warning(f"Пустой ответ от Gemini (попытка {i}).")
-        except Exception as e:
-            logger.error(f"Ошибка Gemini (попытка {i}): {e}")
-
-    logger.error("Все попытки рерайта не удались.")
-    return None
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        prompt = (
+            "Ты — редактор телеграм-канала. Полностью переработай эту новость так, "
+            "чтобы она отличалась от оригинала на 100% по стилю, лексике и построению предложений. "
+            "Используй совершенно другие формулировки, синонимы, измени порядок подачи фактов. "
+            "Ни одна фраза из исходного текста не должна повторяться дословно. "
+            "Сохрани только точные цифры и факты. "
+            "Добавь эмодзи, сделай пост ярким и лаконичным (до 800 символов). "
+            "Не упоминай источник и дату. "
+            "Закончи призывом подписаться на канал @Investing_24.\n\n"
+            f"Исходная статья:\n{original_text}"
+        )
+        config = types.GenerateContentConfig(
+            temperature=0.9,
+            top_p=0.95,
+            max_output_tokens=800,
+        )
+        response = client.models.generate_content(
+            model="models/gemini-2.0-flash-exp",   # РАБОЧАЯ БЕСПЛАТНАЯ МОДЕЛЬ
+            contents=prompt,
+            config=config,
+        )
+        if response.text:
+            logger.info("ИИ успешно переписал текст.")
+            return response.text.strip()
+        else:
+            logger.error("Gemini вернул пустой ответ.")
+            return None
+    except Exception as e:
+        logger.error(f"Ошибка Gemini API: {e}")
+        return None
 
 def send_telegram_post(text, image_url):
     base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
@@ -345,7 +329,6 @@ def main():
             filtered.append(line)
         cleaned_text = "\n".join(filtered)
 
-        # Рерайт через ИИ
         rewritten = ai_rewrite(cleaned_text, image_url)
         if rewritten:
             post = rewritten

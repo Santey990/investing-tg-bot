@@ -227,11 +227,10 @@ def ai_rewrite(original_text, image_url=None):
             top_p=0.95,
             max_output_tokens=800,
         )
-        response = client.models.generate_content(
-            model="models/gemini-1.5-flash",
-            contents=prompt,
-            config=config,
-        )
+       response = client.models.generate_content(
+    model="gemini-2.5-flash-lite",
+    contents=prompt
+)
         if response.text:
             logger.info("ИИ успешно переписал текст.")
             return response.text.strip()

@@ -2,357 +2,208 @@ import os
 import json
 import time
 import logging
-import hashlib
-import re
 import sys
-
+import hashlib
 import feedparser
 import requests
-import cloudscraper
-
-from bs4 import BeautifulSoup
-from readability import Document
-
 from google import genai
+from google.genai import types
+
+# ================= RSS SOURCES =================
 
 RSS_URLS = [
-    "https://1prime.ru/export/rss2/index.xml"
+    # 🇷🇺 Russian sources
+    "https://1prime.ru/export/rss2/index.xml",
+    "https://ru.investing.com/rss/news.rss",
+
+    # 🌍 Global markets
+    "https://feeds.reuters.com/reuters/businessNews",
+    "https://feeds.reuters.com/reuters/marketsNews",
+    "https://feeds.bbci.co.uk/news/business/rss.xml",
+
+    # 📊 Investing feeds (markets/forex/economy)
+    "https://www.investing.com/rss/news_25.rss",
+    "https://www.investing.com/rss/news_288.rss",
+    "https://www.investing.com/rss/news_11.rss",
+
+    # 💡 Macro alternative feed
+    "https://www.ft.com/?format=rss",
 ]
+
+# ================= ENV =================
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
-DATA_FILE = "posted_guids.json"
+DATA_FILE = "posted.json"
 MAX_ITEMS_PER_RUN = 5
-LOG_FILE = "bot.log"
+
+# ================= LOGGING =================
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s: %(message)s",
     handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
         logging.StreamHandler(sys.stdout)
     ]
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger()
 
-scraper = cloudscraper.create_scraper()
+# ================= STORAGE =================
 
-
-# ---------------- GUID ----------------
-
-def load_posted_guids():
+def load_posted():
     if not os.path.exists(DATA_FILE):
         return set()
-
     try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return set(json.load(f))
-    except Exception:
+        return set(json.load(open(DATA_FILE, "r")))
+    except:
         return set()
 
+def save_posted(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(list(data), f)
 
-def save_posted_guids(guids):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(guids), f, ensure_ascii=False)
+def make_id(entry):
+    raw = entry.get("link", "") + entry.get("title", "")
+    return hashlib.md5(raw.encode()).hexdigest()
 
-
-def make_guid(entry):
-    if getattr(entry, "id", None):
-        return entry.id
-
-    return hashlib.md5(
-        (entry.link + entry.get("title", "")).encode("utf-8")
-    ).hexdigest()
-
-
-# ---------------- RSS ----------------
+# ================= RSS =================
 
 def fetch_rss(url):
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/rss+xml,text/xml,*/*"
+    }
     try:
-        r = requests.get(
-            url,
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=20
-        )
-        r.raise_for_status()
-        return r.content
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        return feedparser.parse(resp.content).entries
     except Exception as e:
-        logger.error(f"RSS error: {e}")
-        return None
-
+        logger.error(f"RSS error {url}: {e}")
+        return []
 
 def get_all_entries():
-    entries = []
+    all_items = []
 
     for url in RSS_URLS:
-        content = fetch_rss(url)
+        entries = fetch_rss(url)
+        logger.info(f"{url} -> {len(entries)} items")
 
-        if not content:
-            continue
+        for e in entries:
+            all_items.append((e, url))
 
-        feed = feedparser.parse(content)
+    return all_items
 
-        logger.info(
-            f"Получено {len(feed.entries)} записей из {url}"
-        )
+# ================= FILTER =================
 
-        for item in feed.entries:
-            entries.append(item)
+def is_bad(entry):
+    title = entry.get("title", "")
+    if len(title) < 20:
+        return True
+    return False
 
-    return entries
+# ================= AI REWRITE =================
 
-
-# ---------------- IMAGE ----------------
-
-def extract_image(entry):
+def ai_rewrite(title, text):
     try:
-        if hasattr(entry, "enclosures"):
-            for enc in entry.enclosures:
-                if "image" in enc.get("type", ""):
-                    return enc.href
-    except:
-        pass
-
-    try:
-        if hasattr(entry, "media_content"):
-            for media in entry.media_content:
-                return media.get("url")
-    except:
-        pass
-
-    try:
-        page = requests.get(
-            entry.link,
-            timeout=15,
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
-
-        soup = BeautifulSoup(page.text, "html.parser")
-
-        og = soup.find("meta", property="og:image")
-
-        if og:
-            return og.get("content")
-    except:
-        pass
-
-    return None
-
-
-# ---------------- CLEAN ----------------
-
-def clean_text(text):
-    lines = []
-
-    for line in text.splitlines():
-
-        line = line.strip()
-
-        if not line:
-            continue
-
-        if len(line) < 20:
-            continue
-
-        if "ria.ru" in line.lower():
-            continue
-
-        if "прайм" in line.lower():
-            continue
-
-        lines.append(line)
-
-    return "\n".join(lines)
-
-
-# ---------------- ARTICLE ----------------
-
-def extract_article_text(url, fallback=""):
-    try:
-        response = scraper.get(url, timeout=20)
-
-        doc = Document(response.text)
-
-        soup = BeautifulSoup(
-            doc.summary(),
-            "html.parser"
-        )
-
-        for tag in soup(
-            ["script", "style", "img", "figure"]
-        ):
-            tag.decompose()
-
-        text = soup.get_text(
-            separator="\n",
-            strip=True
-        )
-
-        if len(text) > 200:
-            return text[:8000]
-
-    except Exception as e:
-        logger.warning(f"Article parse error: {e}")
-
-    return fallback[:8000]
-
-
-# ---------------- GEMINI ----------------
-
-def ai_rewrite(text):
-    try:
-        client = genai.Client(
-            api_key=GEMINI_API_KEY
-        )
+        client = genai.Client(api_key=GEMINI_API_KEY)
 
         prompt = f"""
-Ты финансовый редактор Telegram-канала Investing-24.
+Ты редактор финансового новостного агентства уровня Bloomberg.
 
-Полностью перепиши новость.
+СДЕЛАЙ:
+1. Заголовок (сильный, короткий)
+2. Лид (1-2 предложения)
+3. Основной текст (2–4 предложения, переработай полностью)
+4. Рыночный контекст (если есть влияние)
+5. 2-3 тега (#markets #stocks #crypto)
 
-Требования:
+ПРАВИЛА:
+- не копируй текст
+- сохраняй факты
+- русский язык
+- до 900 символов
 
-- Новый стиль изложения
-- Не копируй оригинальные предложения
-- Сохрани факты и цифры
-- Добавь подходящие эмодзи
-- До 800 символов
-- Без упоминания источника
-- В конце добавь:
+ЗАГОЛОВОК:
+{title}
 
-📢 Подписывайтесь: @Investing_24
-
-Текст:
-
+ТЕКСТ:
 {text}
 """
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
-            contents=prompt
+        resp = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.6,
+                max_output_tokens=900
+            )
         )
 
-        if response.text:
-            return response.text.strip()
+        return resp.text.strip() if resp.text else None
 
     except Exception as e:
-        logger.error(f"Gemini error: {e}")
+        logger.error(f"AI error: {e}")
+        return None
 
-    return None
+# ================= TELEGRAM =================
 
+def send_telegram(text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
-# ---------------- TELEGRAM ----------------
-
-def send_post(text, image_url=None):
-
-    base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+    payload = {
+        "chat_id": CHANNEL_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    }
 
     try:
-
-        if image_url:
-
-            result = requests.post(
-                f"{base}/sendPhoto",
-                data={
-                    "chat_id": CHANNEL_ID,
-                    "photo": image_url,
-                    "caption": text[:1024]
-                },
-                timeout=30
-            )
-
-        else:
-
-            result = requests.post(
-                f"{base}/sendMessage",
-                data={
-                    "chat_id": CHANNEL_ID,
-                    "text": text,
-                    "disable_web_page_preview": True
-                },
-                timeout=30
-            )
-
-        result.raise_for_status()
-
-        return True
-
+        r = requests.post(url, data=payload, timeout=20)
+        return r.json().get("ok", False)
     except Exception as e:
-
         logger.error(f"Telegram error: {e}")
-
         return False
 
-
-# ---------------- MAIN ----------------
+# ================= MAIN =================
 
 def main():
-
-    logger.info("=== START ===")
-
-    posted = load_posted_guids()
-
+    posted = load_posted()
     entries = get_all_entries()
 
-    new_posts = 0
+    count = 0
 
-    for entry in entries:
-
-        guid = make_guid(entry)
-
-        if guid in posted:
-            continue
-
-        if new_posts >= MAX_ITEMS_PER_RUN:
+    for entry, src in entries:
+        if count >= MAX_ITEMS_PER_RUN:
             break
 
+        if is_bad(entry):
+            continue
+
+        uid = make_id(entry)
+        if uid in posted:
+            continue
+
         title = entry.get("title", "")
+        summary = entry.get("summary", "") or entry.get("description", "")
 
-        logger.info(f"Новость: {title}")
+        logger.info(f"Processing: {title}")
 
-        description = entry.get(
-            "description",
-            ""
-        )
+        post = ai_rewrite(title, summary)
 
-        article = extract_article_text(
-            entry.link,
-            description
-        )
+        if not post:
+            post = f"{title}\n\n{summary[:700]}\n\n#markets"
 
-        article = clean_text(article)
+        if send_telegram(post):
+            posted.add(uid)
+            save_posted(posted)
+            count += 1
+            logger.info("Posted OK")
+            time.sleep(2)
 
-        if not article:
-            article = title
-
-        rewritten = ai_rewrite(article)
-
-        if not rewritten:
-            rewritten = f"📈 {title}\n\n📢 Подписывайтесь: @Investing_24"
-
-        image = extract_image(entry)
-
-        if send_post(rewritten, image):
-
-            posted.add(guid)
-
-            save_posted_guids(posted)
-
-            new_posts += 1
-
-            logger.info(
-                f"Опубликовано: {title}"
-            )
-
-            time.sleep(3)
-
-    logger.info(
-        f"Готово. Добавлено {new_posts} постов."
-    )
-
+    logger.info(f"Done. New posts: {count}")
 
 if __name__ == "__main__":
     main()

@@ -3,7 +3,6 @@ requests==2.32.4
 cloudscraper==1.2.71
 beautifulsoup4==4.13.4
 readability-lxml==0.8.4.1
-google-genai==1.24.0
 lxml==5.4.0
 lxml_html_clean==0.4.2
-tenacity==8.5.0
+tenacity==8.5.0   # если есть, можно оставить, но не обязательна

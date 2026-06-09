@@ -207,11 +207,10 @@ def add_emoji_prefix(text):
         return "💵 " + text
     return "🔹 " + text
 
-# ---------- ИИ-рерайт (исправлен: api_version='v1', модель gemini-1.5-flash) ----------
+# ---------- ИИ-рерайт (исправлено: без api_version, модель gemini-1.5-flash) ----------
 def ai_rewrite(original_text, image_url=None):
     try:
-        # Явно указываем версию API, которая работает с бесплатными ключами
-        client = genai.Client(api_key=GEMINI_API_KEY, api_version='v1')
+        client = genai.Client(api_key=GEMINI_API_KEY)
         prompt = (
             "Ты — редактор телеграм-канала. Полностью переработай эту новость так, "
             "чтобы она отличалась от оригинала на 100% по стилю, лексике и построению предложений. "
@@ -229,7 +228,7 @@ def ai_rewrite(original_text, image_url=None):
             max_output_tokens=800,
         )
         response = client.models.generate_content(
-            model="models/gemini-1.5-flash",   # стабильная бесплатная модель
+            model="models/gemini-1.5-flash",
             contents=prompt,
             config=config,
         )

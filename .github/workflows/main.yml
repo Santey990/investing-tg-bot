@@ -2,7 +2,7 @@ name: Investing-24 RSS Bot
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # каждые 30 минут
+    - cron: "*/5 * * * *"   # каждые 30 минут
   workflow_dispatch:
 
 jobs:

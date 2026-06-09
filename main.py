@@ -5,6 +5,7 @@ import logging
 import hashlib
 import re
 import sys
+from datetime import datetime
 
 import feedparser
 import requests
@@ -13,6 +14,9 @@ import cloudscraper
 from bs4 import BeautifulSoup
 from readability import Document
 
+# Импорт Groq SDK
+from groq import Groq
+
 # ==================== CONFIG ====================
 RSS_URLS = [
     "https://1prime.ru/export/rss2/index.xml"
@@ -20,10 +24,10 @@ RSS_URLS = [
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]           # API-ключ Groq
 
 DATA_FILE = "posted_guids.json"
-MAX_ITEMS_PER_RUN = 1          # можно уменьшить до 2 для большей надёжности
+MAX_ITEMS_PER_RUN = 2                                # 2 поста за запуск
 LOG_FILE = "bot.log"
 
 logging.basicConfig(
@@ -135,12 +139,17 @@ def extract_article_text(url, fallback=""):
         logger.warning(f"Article parse error: {e}")
     return fallback[:8000]
 
-# ==================== AI ЧЕРЕЗ OPENROUTER (УЛУЧШЕННАЯ) ====================
-OPENROUTER_MODEL = "mistralai/mistral-7b-instruct:free"   # надёжная бесплатная модель
+# ==================== AI ЧЕРЕЗ GROQ (НОВЫЙ) ====================
+# Инициализация Groq клиента
+groq_client = Groq(api_key=GROQ_API_KEY)
 
 def ai_rewrite(text):
-    if not OPENROUTER_API_KEY:
-        logger.warning("OPENROUTER_API_KEY не задан, AI недоступен")
+    """
+    Отправляет текст в Groq API для переписывания.
+    Возвращает переписанный текст или None в случае ошибки.
+    """
+    if not GROQ_API_KEY:
+        logger.warning("GROQ_API_KEY не задан, AI недоступен")
         return None
 
     prompt = f"""Ты финансовый редактор Telegram-канала Investing-24. Полностью перепиши новость.
@@ -151,47 +160,36 @@ def ai_rewrite(text):
 - Добавь подходящие эмодзи
 - До 800 символов
 - Без упоминания источника
-- В конце добавь: 📢 @Investing_24
+- В конце добавь: 📢 Подписывайтесь: @Investing_24
 
 Текст новости:
 {text}"""
 
-    for attempt in range(1, 4):
+    for attempt in range(1, 4):  # до 3 попыток
         try:
-            response = requests.post(
-                url="https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": OPENROUTER_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 800,
-                    "temperature": 0.7,
-                },
-                timeout=45,
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",  # отличная модель для новостей
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=800,
+                temperature=0.7,
+                timeout=45
             )
-            if response.status_code == 200:
-                data = response.json()
-                if "choices" in data and data["choices"]:
-                    content = data["choices"][0]["message"]["content"].strip()
-                    if content:
-                        return content
-                    else:
-                        logger.warning(f"Пустой ответ от OpenRouter (попытка {attempt})")
-                else:
-                    logger.warning(f"Неожиданный формат ответа: {data}")
-            elif response.status_code == 429:
-                logger.warning(f"Превышен лимит OpenRouter, ждём 15 сек (попытка {attempt})")
-                time.sleep(15)
+            content = response.choices[0].message.content.strip()
+            if content:
+                return content
             else:
-                logger.error(f"OpenRouter ошибка {response.status_code}: {response.text[:200]}")
-                if attempt == 3:
-                    return None
+                logger.warning(f"Groq вернул пустой ответ (попытка {attempt})")
         except Exception as e:
-            logger.error(f"OpenRouter исключение: {e}")
-            time.sleep(2 ** attempt)
+            # Проверяем, не превышен ли лимит (429)
+            if "429" in str(e):
+                wait_time = 30  # ждём 30 секунд
+                logger.warning(f"Превышен лимит Groq (попытка {attempt}), ждём {wait_time} сек")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"Groq ошибка (попытка {attempt}): {e}")
+                if attempt == 3:  # если это была последняя попытка
+                    return None
+                time.sleep(2 ** attempt)  # экспоненциальная задержка
     return None
 
 # ==================== TELEGRAM ====================
@@ -242,7 +240,7 @@ def main():
 
         rewritten = ai_rewrite(article)
         if not rewritten:
-            rewritten = f"📈 {title}\n\n📢 Подписывайтесь: @Investing_24"
+            rewritten = f"📈 {title}\n\n📢 @Investing_24"
             logger.warning(f"AI не сработал, использован fallback для: {title}")
 
         image = extract_image(entry)
@@ -251,7 +249,7 @@ def main():
             newly_posted_guids.add(guid)
             new_posts += 1
             logger.info(f"Опубликовано: {title}")
-            time.sleep(3)
+            time.sleep(3)  # небольшая пауза между постами
 
     if newly_posted_guids:
         updated_guids = posted.union(newly_posted_guids)

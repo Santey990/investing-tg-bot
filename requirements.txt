@@ -5,4 +5,7 @@ beautifulsoup4==4.13.4
 readability-lxml==0.8.4.1
 lxml==5.4.0
 lxml_html_clean==0.4.2
-tenacity==8.5.0   # если есть, можно оставить, но не обязательна
+tenacity==8.5.0
+urllib3>=1.26,<2.0
+chardet>=5.0,<6.0
+charset-normalizer>=3.0,<3.5

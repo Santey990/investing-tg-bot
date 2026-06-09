@@ -135,11 +135,15 @@ def extract_article_text(url, fallback=""):
         logger.warning(f"Article parse error: {e}")
     return fallback[:8000]
 
-# ==================== AI через OpenRouter (с повторными попытками при None) ====================
+# ==================== AI через OpenRouter (расширенный список моделей) ====================
+# Широкий список бесплатных моделей (в порядке предпочтения)
 OPENROUTER_MODELS = [
     "nvidia/nemotron-3-nano-30b-a3b:free",
     "meta-llama/llama-3.2-3b-instruct:free",
-    "microsoft/phi-3-mini-128k-instruct:free"
+    "microsoft/phi-3-mini-128k-instruct:free",
+    "google/gemma-2-9b-it:free",
+    "qwen/qwen3-next-80b-a3b-instruct:free",
+    "mistralai/mistral-7b-instruct:free"
 ]
 
 def ai_rewrite(text):
@@ -161,7 +165,8 @@ def ai_rewrite(text):
 {text}"""
 
     for model_name in OPENROUTER_MODELS:
-        for attempt in range(1, 3):  # 2 попытки на модель (повтор при None)
+        # Делаем 2 попытки для каждой модели (повтор при None или пустом ответе)
+        for attempt in range(1, 3):
             try:
                 response = requests.post(
                     url="https://openrouter.ai/api/v1/chat/completions",
@@ -193,12 +198,13 @@ def ai_rewrite(text):
                             logger.warning(f"⚠️ Модель {model_name} вернула нестроковое значение: {content} (попытка {attempt})")
                     except (KeyError, IndexError, TypeError) as e:
                         logger.warning(f"⚠️ Модель {model_name} вернула неожиданный формат: {e} (попытка {attempt})")
-                    # Если пустой ответ или ошибка формата, делаем повторную попытку
+                    
+                    # Если получили пустой ответ или None, пробуем ещё раз с этой же моделью
                     if attempt == 1:
                         time.sleep(3)
                         continue
                     else:
-                        break  # переходим к следующей модели
+                        break  # после 2 неудач переходим к следующей модели
 
                 elif response.status_code == 429:
                     logger.warning(f"⏳ Модель {model_name} превысила лимит (429), пробуем следующую...")
@@ -219,6 +225,7 @@ def ai_rewrite(text):
                 else:
                     break
 
+    # Если ни одна модель не сработала
     logger.error("❌ Все модели из списка недоступны, используем fallback.")
     return None
 

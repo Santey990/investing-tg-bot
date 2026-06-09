@@ -1,209 +1,246 @@
-import os
-import json
-import time
-import logging
-import sys
-import hashlib
+import os, json, time, logging, sys, hashlib
 import feedparser
 import requests
+import cloudscraper
+from bs4 import BeautifulSoup
+from readability import Document
 from google import genai
-from google.genai import types
 
-# ================= RSS SOURCES =================
+# ---------------- CONFIG ----------------
 
 RSS_URLS = [
-    # 🇷🇺 Russian sources
     "https://1prime.ru/export/rss2/index.xml",
     "https://ru.investing.com/rss/news.rss",
-
-    # 🌍 Global markets
     "https://feeds.reuters.com/reuters/businessNews",
-    "https://feeds.reuters.com/reuters/marketsNews",
-    "https://feeds.bbci.co.uk/news/business/rss.xml",
-
-    # 📊 Investing feeds (markets/forex/economy)
-    "https://www.investing.com/rss/news_25.rss",
-    "https://www.investing.com/rss/news_288.rss",
-    "https://www.investing.com/rss/news_11.rss",
-
-    # 💡 Macro alternative feed
-    "https://www.ft.com/?format=rss",
+    "https://www.cnbc.com/id/100003114/device/rss/rss.html"
 ]
-
-# ================= ENV =================
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
-DATA_FILE = "posted.json"
+DATA_FILE = "posted_guids.json"
 MAX_ITEMS_PER_RUN = 5
-
-# ================= LOGGING =================
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
-
 logger = logging.getLogger()
 
-# ================= STORAGE =================
+scraper = cloudscraper.create_scraper()
 
-def load_posted():
+# ---------------- STORAGE ----------------
+
+def load_posted_guids():
     if not os.path.exists(DATA_FILE):
         return set()
     try:
-        return set(json.load(open(DATA_FILE, "r")))
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
     except:
         return set()
 
-def save_posted(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(list(data), f)
+def save_posted_guids(guids):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(guids), f)
 
-def make_id(entry):
-    raw = entry.get("link", "") + entry.get("title", "")
+def make_guid(entry):
+    raw = (entry.get("id") or entry.get("link") or "") + entry.get("title", "")
     return hashlib.md5(raw.encode()).hexdigest()
 
-# ================= RSS =================
+# ---------------- RSS ----------------
 
 def fetch_rss(url):
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/rss+xml,text/xml,*/*"
-    }
     try:
-        resp = requests.get(url, headers=headers, timeout=20)
-        resp.raise_for_status()
-        return feedparser.parse(resp.content).entries
-    except Exception as e:
-        logger.error(f"RSS error {url}: {e}")
-        return []
+        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        return r.content
+    except:
+        return None
 
 def get_all_entries():
-    all_items = []
-
+    all_entries = []
     for url in RSS_URLS:
-        entries = fetch_rss(url)
-        logger.info(f"{url} -> {len(entries)} items")
+        content = fetch_rss(url)
+        if not content:
+            continue
+        feed = feedparser.parse(content)
+        for e in feed.entries:
+            all_entries.append((e, url))
+    return all_entries
 
-        for e in entries:
-            all_items.append((e, url))
+# ---------------- IMAGE ENGINE (NO API) ----------------
 
-    return all_items
+def extract_image(entry, url=None, title=None):
 
-# ================= FILTER =================
+    # 1. RSS media
+    try:
+        if hasattr(entry, "media_content"):
+            for m in entry.media_content:
+                if m.get("url"):
+                    return m["url"]
+    except:
+        pass
 
-def is_bad(entry):
-    title = entry.get("title", "")
-    if len(title) < 20:
-        return True
-    return False
+    # 2. RSS enclosures
+    try:
+        if hasattr(entry, "enclosures"):
+            for e in entry.enclosures:
+                if "image" in e.get("type", ""):
+                    return e.get("href")
+    except:
+        pass
 
-# ================= AI REWRITE =================
+    # 3. OpenGraph / Twitter / HTML parsing
+    try:
+        r = requests.get(
+            url or entry.link,
+            timeout=10,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
 
-def ai_rewrite(title, text):
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # og:image
+        og = soup.find("meta", property="og:image")
+        if og and og.get("content"):
+            return og["content"]
+
+        # twitter:image
+        tw = soup.find("meta", attrs={"name": "twitter:image"})
+        if tw and tw.get("content"):
+            return tw["content"]
+
+        # first article image fallback
+        img = soup.find("img")
+        if img and img.get("src"):
+            return img["src"]
+
+    except:
+        pass
+
+    # 4. SMART fallback (NO API)
+    q = (title or entry.get("title", "")).lower()
+
+    if any(w in q for w in ["oil", "gas", "energy", "нефть", "газ"]):
+        return "https://images.unsplash.com/photo-1611273426858-4500b6f7f8c4"
+
+    if any(w in q for w in ["stock", "market", "index", "бирж", "акци"]):
+        return "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3"
+
+    if any(w in q for w in ["crypto", "bitcoin", "btc"]):
+        return "https://images.unsplash.com/photo-1621761191319-c6fb62004040"
+
+    if any(w in q for w in ["bank", "finance", "credit"]):
+        return "https://images.unsplash.com/photo-1601597111158-2fceff292cdc"
+
+    # final fallback (always valid)
+    return "https://images.unsplash.com/photo-1526304640581-d334cdbbf45e"
+
+# ---------------- ARTICLE TEXT ----------------
+
+def extract_article_text(url):
+    try:
+        r = scraper.get(url, timeout=10)
+        doc = Document(r.text)
+        soup = BeautifulSoup(doc.summary(), "html.parser")
+        return soup.get_text("\n", strip=True)[:8000]
+    except:
+        return None
+
+# ---------------- AI REWRITE ----------------
+
+def ai_rewrite(text):
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
 
         prompt = f"""
-Ты редактор финансового новостного агентства уровня Bloomberg.
+Ты редактор финансового Telegram-канала.
+Перепиши новость полностью (100% уникально).
+Сохрани факты и цифры.
+Добавь эмодзи.
+До 800 символов.
+В конце: подписка @Investing_24
 
-СДЕЛАЙ:
-1. Заголовок (сильный, короткий)
-2. Лид (1-2 предложения)
-3. Основной текст (2–4 предложения, переработай полностью)
-4. Рыночный контекст (если есть влияние)
-5. 2-3 тега (#markets #stocks #crypto)
-
-ПРАВИЛА:
-- не копируй текст
-- сохраняй факты
-- русский язык
-- до 900 символов
-
-ЗАГОЛОВОК:
-{title}
-
-ТЕКСТ:
+Текст:
 {text}
 """
 
-        resp = client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.6,
-                max_output_tokens=900
-            )
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt
         )
 
-        return resp.text.strip() if resp.text else None
+        return response.text.strip()
 
     except Exception as e:
-        logger.error(f"AI error: {e}")
+        logger.error(f"Gemini error: {e}")
         return None
 
-# ================= TELEGRAM =================
+# ---------------- TELEGRAM ----------------
 
-def send_telegram(text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+def send_post(text, image_url):
+    base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-    payload = {
-        "chat_id": CHANNEL_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }
+    if image_url:
+        method = "sendPhoto"
+        payload = {
+            "chat_id": CHANNEL_ID,
+            "photo": image_url,
+            "caption": text[:1024]
+        }
+    else:
+        method = "sendMessage"
+        payload = {
+            "chat_id": CHANNEL_ID,
+            "text": text
+        }
 
     try:
-        r = requests.post(url, data=payload, timeout=20)
+        r = requests.post(f"{base}/{method}", data=payload, timeout=15)
         return r.json().get("ok", False)
-    except Exception as e:
-        logger.error(f"Telegram error: {e}")
+    except:
         return False
 
-# ================= MAIN =================
+# ---------------- MAIN ----------------
 
 def main():
-    posted = load_posted()
+    posted = load_posted_guids()
     entries = get_all_entries()
 
     count = 0
 
-    for entry, src in entries:
+    for entry, rss in entries:
         if count >= MAX_ITEMS_PER_RUN:
             break
 
-        if is_bad(entry):
-            continue
-
-        uid = make_id(entry)
-        if uid in posted:
+        guid = make_guid(entry)
+        if guid in posted:
             continue
 
         title = entry.get("title", "")
-        summary = entry.get("summary", "") or entry.get("description", "")
+        link = entry.get("link", "")
 
         logger.info(f"Processing: {title}")
 
-        post = ai_rewrite(title, summary)
+        image_url = extract_image(entry, link, title)
+        raw_text = extract_article_text(link) or title
 
-        if not post:
-            post = f"{title}\n\n{summary[:700]}\n\n#markets"
+        rewritten = ai_rewrite(raw_text)
 
-        if send_telegram(post):
-            posted.add(uid)
-            save_posted(posted)
+        final_post = rewritten or title
+
+        if send_post(final_post, image_url):
+            posted.add(guid)
+            save_posted_guids(posted)
             count += 1
-            logger.info("Posted OK")
             time.sleep(2)
 
-    logger.info(f"Done. New posts: {count}")
+    logger.info(f"Done. posted={count}")
+
+# ---------------- RUN ----------------
 
 if __name__ == "__main__":
     main()

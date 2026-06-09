@@ -15,7 +15,7 @@ from readability import Document
 
 from google import genai
 from google.genai.errors import APIError
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
 
 # ==================== CONFIG ====================
 RSS_URLS = [
@@ -27,11 +27,10 @@ CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 DATA_FILE = "posted_guids.json"
-MAX_ITEMS_PER_RUN = 5
-MAX_GEMINI_CALLS_PER_RUN = 2  # <-- Лимит вызовов Gemini за один запуск
+MAX_ITEMS_PER_RUN = 3
+MAX_GEMINI_CALLS_PER_RUN = 1   # <-- Всего 1 вызов Gemini за запуск (бесплатный лимит 20/день)
 LOG_FILE = "bot.log"
 
-# ==================== LOGGING ====================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s: %(message)s",
@@ -96,7 +95,6 @@ def is_valid_image_url(url):
     return url and isinstance(url, str) and url.startswith(("http://", "https://"))
 
 def extract_image(entry):
-    # Пробуем enclosures
     try:
         if hasattr(entry, "enclosures"):
             for enc in entry.enclosures:
@@ -104,7 +102,6 @@ def extract_image(entry):
                     return enc.href
     except:
         pass
-    # Пробуем media_content
     try:
         if hasattr(entry, "media_content"):
             for media in entry.media_content:
@@ -113,7 +110,6 @@ def extract_image(entry):
                     return url
     except:
         pass
-    # Пробуем Open Graph
     try:
         page = requests.get(
             entry.link,
@@ -130,22 +126,15 @@ def extract_image(entry):
 
 # ==================== TEXT CLEANING ====================
 def clean_text(text):
-    """
-    Удаляет мусорные строки, но сохраняет короткие значимые фрагменты
-    (например, "Цена выросла на 2%" – 18 символов – полезно).
-    """
     lines = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
-        # Пропускаем строки, состоящие только из цифр/знаков/однобуквенных слов
         if re.fullmatch(r'[\d\s\.,;:!?\-]+', line):
             continue
-        # Пропускаем строки короче 15 символов, если в них нет цифр (цифры часто важны)
         if len(line) < 15 and not re.search(r'\d', line):
             continue
-        # Удаляем упоминания источника
         if "ria.ru" in line.lower() or "прайм" in line.lower():
             continue
         lines.append(line)
@@ -153,14 +142,9 @@ def clean_text(text):
 
 # ==================== ARTICLE EXTRACTION ====================
 def extract_article_text(url, fallback=""):
-    """
-    Извлекает основной текст статьи. Если fallback достаточно длинный (>300 символов),
-    использует его, чтобы не скачивать страницу.
-    """
     if fallback and len(fallback) > 300:
         logger.debug(f"Использую описание новости вместо полной статьи: {url[:60]}...")
         return fallback[:8000]
-
     try:
         response = scraper.get(url, timeout=20)
         doc = Document(response.text)
@@ -174,41 +158,20 @@ def extract_article_text(url, fallback=""):
         logger.warning(f"Article parse error: {e}")
     return fallback[:8000]
 
-# ==================== GEMINI (with retries) ====================
+# ==================== GEMINI (без падений) ====================
 def extract_retry_delay(error_message: str) -> int:
-    """
-    Пытается извлечь число секунд из сообщения 'Please retry in Xs'.
-    Возвращает 0, если не найдено.
-    """
     match = re.search(r'retry in (\d+(?:\.\d+)?)\s*[sS]', error_message)
     if match:
         return int(float(match.group(1)))
     return 0
 
-def is_retryable_exception(exception):
-    """Определяет, можно ли повторить запрос при данной ошибке."""
-    if isinstance(exception, APIError):
-        # 429 – quota exceeded, 503 – temporary overload
-        if hasattr(exception, 'code') and exception.code in (429, 503):
-            return True
-        # Некоторые ошибки могут быть без кода, проверяем сообщение
-        msg = str(exception).lower()
-        if "quota exceeded" in msg or "too many requests" in msg or "service unavailable" in msg:
-            return True
-    return False
-
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=60),
-    retry=retry_if_exception_type(APIError),
-    before_sleep=lambda retry_state: logger.warning(
-        f"Gemini error, retry {retry_state.attempt_number}/3: {retry_state.outcome.exception()}"
-    )
-)
-def ai_rewrite(text):
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        prompt = f"""
+def ai_rewrite_safe(text):
+    """
+    Вызывает Gemini с повторными попытками, но ВСЕГДА возвращает либо текст, либо None.
+    Никогда не выбрасывает исключение.
+    """
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    prompt = f"""
 Ты финансовый редактор Telegram-канала Investing-24.
 
 Полностью перепиши новость.
@@ -229,24 +192,31 @@ def ai_rewrite(text):
 
 {text}
 """
-        response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
-            contents=prompt
-        )
-        if response.text:
-            return response.text.strip()
-    except APIError as e:
-        # Если ошибка 429 и есть рекомендация подождать – ждём
-        if hasattr(e, 'code') and e.code == 429:
+
+    # Ручные повторные попытки с уважением retryDelay
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash-lite",
+                contents=prompt
+            )
+            if response.text:
+                return response.text.strip()
+            else:
+                logger.warning(f"Gemini вернул пустой ответ, попытка {attempt}")
+        except APIError as e:
+            # Пытаемся извлечь рекомендуемую задержку
             delay = extract_retry_delay(str(e))
-            if delay:
-                logger.info(f"Gemini quota exceeded, waiting {delay} seconds before retry")
-                time.sleep(delay)
-        # Пробрасываем исключение дальше, чтобы tenacity повторил попытку
-        raise
-    except Exception as e:
-        logger.error(f"Gemini unexpected error: {e}")
-        return None
+            if delay == 0:
+                delay = 2 ** attempt  # экспоненциальная задержка
+            logger.warning(f"Gemini error (attempt {attempt}/{max_attempts}): {e}. Ждём {delay} сек.")
+            time.sleep(delay)
+        except Exception as e:
+            logger.error(f"Gemini неизвестная ошибка: {e}")
+            break  # не повторяем
+
+    logger.error("Gemini не ответил после всех попыток")
     return None
 
 # ==================== TELEGRAM ====================
@@ -254,7 +224,6 @@ def send_post(text, image_url=None):
     base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     try:
         if image_url and is_valid_image_url(image_url):
-            # Пытаемся отправить с фото
             result = requests.post(
                 f"{base}/sendPhoto",
                 data={
@@ -265,12 +234,10 @@ def send_post(text, image_url=None):
                 timeout=30
             )
             if result.status_code == 400:
-                # Если фото не принято (например, битая ссылка), отправим без фото
                 logger.warning(f"Photo rejected, sending without image. URL: {image_url}")
                 return send_post(text, image_url=None)
             result.raise_for_status()
         else:
-            # Отправка только текста
             result = requests.post(
                 f"{base}/sendMessage",
                 data={
@@ -295,8 +262,6 @@ def main():
 
     new_posts = 0
     gemini_calls = 0
-
-    # Будем накапливать новые GUID, чтобы сохранить один раз в конце
     newly_posted_guids = set()
 
     for entry in entries:
@@ -322,15 +287,14 @@ def main():
 
         if use_gemini:
             logger.info(f"Вызов Gemini для новости: {title[:50]}...")
-            rewritten = ai_rewrite(article)
+            rewritten = ai_rewrite_safe(article)  # <-- БЕЗОПАСНЫЙ ВЫЗОВ, ВСЕГДА ВОЗВРАЩАЕТ None ИЛИ ТЕКСТ
             gemini_calls += 1
             if rewritten:
                 logger.info("Gemini успешно обработал новость")
             else:
-                logger.warning("Gemini вернул пустой результат, использую заглушку")
+                logger.warning("Gemini вернул None, использую заглушку")
 
         if not rewritten:
-            # Заглушка, если Gemini не использовался или не сработал
             rewritten = f"📈 {title}\n\n📢 Подписывайтесь: @Investing_24"
 
         image = extract_image(entry)
@@ -339,9 +303,9 @@ def main():
             newly_posted_guids.add(guid)
             new_posts += 1
             logger.info(f"Опубликовано: {title}")
-            time.sleep(3)  # небольшая пауза между постами
+            time.sleep(3)  # пауза между постами
 
-    # Сохраняем все новые GUID одной записью
+    # Сохраняем все новые GUID один раз
     if newly_posted_guids:
         updated_guids = posted.union(newly_posted_guids)
         save_posted_guids(updated_guids)

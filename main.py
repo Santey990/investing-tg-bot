@@ -24,7 +24,7 @@ CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 DATA_FILE = "posted_guids.json"
-MAX_ITEMS_PER_RUN = 3
+MAX_ITEMS_PER_RUN = 2
 LOG_FILE = "bot.log"
 
 logging.basicConfig(

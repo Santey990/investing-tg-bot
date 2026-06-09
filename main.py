@@ -23,7 +23,7 @@ CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 DATA_FILE = "posted_guids.json"
-MAX_ITEMS_PER_RUN = 2
+MAX_ITEMS_PER_RUN = 3
 LOG_FILE = "bot.log"
 
 logging.basicConfig(

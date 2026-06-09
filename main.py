@@ -23,7 +23,7 @@ CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 DATA_FILE = "posted_guids.json"
-MAX_ITEMS_PER_RUN = 3
+MAX_ITEMS_PER_RUN = 2
 LOG_FILE = "bot.log"
 
 logging.basicConfig(
@@ -135,15 +135,15 @@ def extract_article_text(url, fallback=""):
         logger.warning(f"Article parse error: {e}")
     return fallback[:8000]
 
-# ==================== AI через OpenRouter (расширенный список моделей) ====================
-# Широкий список бесплатных моделей (в порядке предпочтения)
+# ==================== AI через OpenRouter (актуальные бесплатные модели, июнь 2026) ====================
+# Список моделей из официального топа OpenRouter, отсортированных по качеству/скорости
 OPENROUTER_MODELS = [
-    "nvidia/nemotron-3-nano-30b-a3b:free",
-    "meta-llama/llama-3.2-3b-instruct:free",
-    "microsoft/phi-3-mini-128k-instruct:free",
-    "google/gemma-2-9b-it:free",
-    "qwen/qwen3-next-80b-a3b-instruct:free",
-    "mistralai/mistral-7b-instruct:free"
+    "google/gemma-4-31b-it:free",          # лучшая для русского, 256K контекст
+    "nvidia/nemotron-3-super:free",        # мощный аналитик, 1M контекста
+    "openai/gpt-oss-120b:free",            # 120B MoE, сильное понимание
+    "z-ai/glm-4.5-air:free",              # быстрая, качественная
+    "moonshotai/kimi-k2.6:free",           # мультиагентная, надёжная
+    "openrouter/free"                       # автоматический выбор любой бесплатной модели
 ]
 
 def ai_rewrite(text):
@@ -165,7 +165,7 @@ def ai_rewrite(text):
 {text}"""
 
     for model_name in OPENROUTER_MODELS:
-        # Делаем 2 попытки для каждой модели (повтор при None или пустом ответе)
+        # Делаем 2 попытки для каждой модели (иногда бывает временный None)
         for attempt in range(1, 3):
             try:
                 response = requests.post(
@@ -199,7 +199,7 @@ def ai_rewrite(text):
                     except (KeyError, IndexError, TypeError) as e:
                         logger.warning(f"⚠️ Модель {model_name} вернула неожиданный формат: {e} (попытка {attempt})")
                     
-                    # Если получили пустой ответ или None, пробуем ещё раз с этой же моделью
+                    # Если пустой ответ или None, пробуем ещё раз с этой же моделью
                     if attempt == 1:
                         time.sleep(3)
                         continue
@@ -209,7 +209,7 @@ def ai_rewrite(text):
                 elif response.status_code == 429:
                     logger.warning(f"⏳ Модель {model_name} превысила лимит (429), пробуем следующую...")
                     time.sleep(5)
-                    break  # переходим к следующей модели
+                    break
                 elif response.status_code == 404:
                     logger.warning(f"❌ Модель {model_name} не найдена (404), пробуем следующую...")
                     break

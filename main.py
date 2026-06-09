@@ -23,6 +23,8 @@ CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 DATA_FILE = "posted_guids.json"
+RETRY_FILE = "retry_queue.json"      # файл для отложенных новостей
+MAX_RETRIES = 3                       # максимальное число повторных попыток
 MAX_ITEMS_PER_RUN = 2
 LOG_FILE = "bot.log"
 
@@ -106,6 +108,18 @@ def extract_image(entry):
         pass
     return None
 
+def extract_image_from_url(url):
+    """Извлекает картинку из URL (используется для отложенных новостей)."""
+    try:
+        page = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(page.text, "html.parser")
+        og = soup.find("meta", property="og:image")
+        if og:
+            return og.get("content")
+    except:
+        pass
+    return None
+
 # ==================== CLEAN ====================
 def clean_text(text):
     lines = []
@@ -136,14 +150,13 @@ def extract_article_text(url, fallback=""):
     return fallback[:8000]
 
 # ==================== AI через OpenRouter (актуальные бесплатные модели, июнь 2026) ====================
-# Список моделей из официального топа OpenRouter, отсортированных по качеству/скорости
 OPENROUTER_MODELS = [
-    "google/gemma-4-31b-it:free",          # лучшая для русского, 256K контекст
-    "nvidia/nemotron-3-super:free",        # мощный аналитик, 1M контекста
-    "openai/gpt-oss-120b:free",            # 120B MoE, сильное понимание
-    "z-ai/glm-4.5-air:free",              # быстрая, качественная
-    "moonshotai/kimi-k2.6:free",           # мультиагентная, надёжная
-    "openrouter/free"                       # автоматический выбор любой бесплатной модели
+    "google/gemma-4-31b-it:free",
+    "nvidia/nemotron-3-super:free",
+    "openai/gpt-oss-120b:free",
+    "z-ai/glm-4.5-air:free",
+    "moonshotai/kimi-k2.6:free",
+    "openrouter/free"
 ]
 
 def ai_rewrite(text):
@@ -165,7 +178,6 @@ def ai_rewrite(text):
 {text}"""
 
     for model_name in OPENROUTER_MODELS:
-        # Делаем 2 попытки для каждой модели (иногда бывает временный None)
         for attempt in range(1, 3):
             try:
                 response = requests.post(
@@ -199,12 +211,11 @@ def ai_rewrite(text):
                     except (KeyError, IndexError, TypeError) as e:
                         logger.warning(f"⚠️ Модель {model_name} вернула неожиданный формат: {e} (попытка {attempt})")
                     
-                    # Если пустой ответ или None, пробуем ещё раз с этой же моделью
                     if attempt == 1:
                         time.sleep(3)
                         continue
                     else:
-                        break  # после 2 неудач переходим к следующей модели
+                        break
 
                 elif response.status_code == 429:
                     logger.warning(f"⏳ Модель {model_name} превысила лимит (429), пробуем следующую...")
@@ -225,9 +236,37 @@ def ai_rewrite(text):
                 else:
                     break
 
-    # Если ни одна модель не сработала
     logger.error("❌ Все модели из списка недоступны, используем fallback.")
     return None
+
+# ==================== RETRY QUEUE ====================
+def load_retry_queue():
+    if not os.path.exists(RETRY_FILE):
+        return {}
+    try:
+        with open(RETRY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_retry_queue(queue):
+    with open(RETRY_FILE, "w", encoding="utf-8") as f:
+        json.dump(queue, f, ensure_ascii=False, indent=2)
+
+def add_to_retry_queue(guid, entry_data):
+    """Добавляет новость в очередь повторных попыток."""
+    queue = load_retry_queue()
+    if guid in queue:
+        queue[guid]["attempts"] += 1
+    else:
+        queue[guid] = {
+            "attempts": 1,
+            "title": entry_data.get("title"),
+            "link": entry_data.get("link"),
+            "description": entry_data.get("description", ""),
+            "published": entry_data.get("published")
+        }
+    save_retry_queue(queue)
 
 # ==================== TELEGRAM ====================
 def send_post(text, image_url=None):
@@ -255,9 +294,60 @@ def send_post(text, image_url=None):
 def main():
     logger.info("=== START ===")
     posted = load_posted_guids()
+    retry_queue = load_retry_queue()
+    newly_posted_guids = set()
+
+    # ---------- 1. Обработка отложенных новостей из очереди ----------
+    for guid, data in list(retry_queue.items()):
+        if guid in posted:      # уже опубликовано (защита от дублирования)
+            del retry_queue[guid]
+            continue
+
+        title = data.get("title", "")
+        link = data.get("link", "")
+        description = data.get("description", "")
+        attempts = data.get("attempts", 1)
+
+        logger.info(f"Повторная попытка для отложенной новости: {title} (попытка {attempts}/{MAX_RETRIES})")
+
+        article = extract_article_text(link, description)
+        article = clean_text(article)
+        if not article:
+            article = title
+
+        rewritten = ai_rewrite(article)
+        if rewritten:
+            # AI сработал – публикуем пересказ
+            image = extract_image_from_url(link)
+            if send_post(rewritten, image):
+                posted.add(guid)
+                newly_posted_guids.add(guid)
+                del retry_queue[guid]
+                logger.info(f"Отложенная новость опубликована с пересказом: {title}")
+        else:
+            # AI не сработал
+            if attempts >= MAX_RETRIES:
+                # Превышено число попыток – публикуем fallback и удаляем из очереди
+                fallback_text = f"📈 {title}\n\n📢 Подписывайтесь: @Investing_24"
+                image = extract_image_from_url(link)
+                if send_post(fallback_text, image):
+                    posted.add(guid)
+                    newly_posted_guids.add(guid)
+                    del retry_queue[guid]
+                    logger.warning(f"Отложенная новость опубликована как fallback после {MAX_RETRIES} попыток: {title}")
+            else:
+                # Оставляем в очереди, увеличиваем счётчик
+                retry_queue[guid]["attempts"] = attempts + 1
+                logger.info(f"Новость остаётся в очереди, попытка {attempts+1}/{MAX_RETRIES}")
+
+        time.sleep(2)
+
+    # Сохраняем обновлённую очередь после обработки
+    save_retry_queue(retry_queue)
+
+    # ---------- 2. Обычная обработка свежих новостей из RSS ----------
     entries = get_all_entries()
     new_posts = 0
-    newly_posted_guids = set()
 
     for entry in entries:
         guid = make_guid(entry)
@@ -276,24 +366,34 @@ def main():
             article = title
 
         rewritten = ai_rewrite(article)
-        if not rewritten:
-            rewritten = f"📈 {title}\n\n📢 Подписывайтесь: @Investing_24"
-            logger.warning(f"AI не сработал, использован fallback для: {title}")
+        if rewritten:
+            # AI сработал – публикуем пересказ
+            image = extract_image(entry)
+            if send_post(rewritten, image):
+                posted.add(guid)
+                newly_posted_guids.add(guid)
+                new_posts += 1
+                logger.info(f"Опубликовано: {title}")
+        else:
+            # AI не сработал – добавляем новость в очередь повторных попыток
+            add_to_retry_queue(guid, {
+                "title": title,
+                "link": entry.link,
+                "description": description,
+                "published": entry.get("published")
+            })
+            logger.info(f"Новость добавлена в очередь повторных попыток: {title}")
 
-        image = extract_image(entry)
+        time.sleep(3)
 
-        if send_post(rewritten, image):
-            newly_posted_guids.add(guid)
-            new_posts += 1
-            logger.info(f"Опубликовано: {title}")
-            time.sleep(3)
-
+    # ---------- 3. Сохранение состояния ----------
     if newly_posted_guids:
         updated_guids = posted.union(newly_posted_guids)
         save_posted_guids(updated_guids)
         logger.info(f"Сохранено {len(newly_posted_guids)} новых GUID")
 
-    logger.info(f"Готово. Добавлено {new_posts} постов.")
+    queue_remaining = len(load_retry_queue())
+    logger.info(f"Готово. В очереди осталось {queue_remaining} необработанных новостей.")
 
 if __name__ == "__main__":
     main()

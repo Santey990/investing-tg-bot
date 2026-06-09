@@ -3,7 +3,7 @@ name: Investing-24 Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"   # каждые 30 минут (UTC)
+    - cron: "*/30 * * * *"   # каждые 30 минут
 
 permissions:
   contents: write
@@ -30,7 +30,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: python main.py
 
       - name: Save posted state

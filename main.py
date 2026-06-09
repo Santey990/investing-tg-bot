@@ -1,192 +1,161 @@
 import os
-import time
-import json
+import re
 import logging
-import random
 import feedparser
 import requests
 from datetime import datetime
 from google import genai
 
-# =========================
+# ======================
 # CONFIG
-# =========================
+# ======================
+RSS_FEEDS = [
+    "https://ru.investing.com/rss/news.rss",
+    "https://1prime.ru/export/rss2/index.xml",
+]
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-RSS_FEEDS = [
-    "https://ru.investing.com/rss/news.rss",
-    "https://1prime.ru/export/rss2/index.xml",
-    "https://www.cnbc.com/id/100003114/device/rss/rss.html",
-    "https://feeds.reuters.com/reuters/businessNews",
-]
+logging.basicConfig(level=logging.INFO)
 
-POSTED_FILE = "posted_guids.json"
+# ======================
+# CLEANING
+# ======================
+def clean_text(text: str) -> str:
+    if not text:
+        return ""
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+    text = text.strip()
+
+    # убрать мусор Gemini
+    text = re.sub(r"\*\*Заголовок:\*\*", "", text)
+    text = re.sub(r"\*\*Новость:\*\*", "", text)
+    text = re.sub(r"Вот (несколько|несколько вариантов|варианты).*", "", text, flags=re.S)
+    text = re.sub(r"Вариант \d+.*", "", text, flags=re.S)
+
+    # убрать timestamp мусор
+    text = re.sub(r"\[\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}\]\s*Investing-24:?", "", text)
+
+    # убрать хэштеги блока
+    text = re.sub(r"#markets.*", "", text)
+
+    # убрать повторяющиеся пустые строки
+    lines = [l.strip() for l in text.splitlines()]
+    lines = [l for l in lines if l]
+
+    return "\n\n".join(lines).strip()
 
 
-# =========================
-# STORAGE
-# =========================
-
-def load_posted():
-    if os.path.exists(POSTED_FILE):
-        with open(POSTED_FILE, "r") as f:
-            return set(json.load(f))
-    return set()
-
-
-def save_posted(data):
-    with open(POSTED_FILE, "w") as f:
-        json.dump(list(data), f)
+def is_valid(text: str) -> bool:
+    if not text:
+        return False
+    if len(text) < 40:
+        return False
+    if "http" in text and len(text) < 60:
+        return False
+    return True
 
 
-# =========================
+# ======================
+# GEMINI REWRITE
+# ======================
+def rewrite_news(title: str, summary: str) -> str:
+    prompt = f"""
+You are a financial newsroom editor.
+
+Rewrite this news into clean Investing-style format in Russian.
+
+RULES:
+- ONLY final text
+- NO "Заголовок:"
+- NO "Новость:"
+- NO variants
+- NO explanations
+- 2-5 sentences max
+- neutral financial tone
+
+TITLE: {title}
+TEXT: {summary}
+"""
+
+    try:
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt
+        )
+        return resp.text or ""
+    except Exception as e:
+        logging.error(f"Gemini error: {e}")
+        return ""
+
+
+# ======================
 # RSS
-# =========================
-
+# ======================
 def fetch_news():
     items = []
 
     for url in RSS_FEEDS:
         feed = feedparser.parse(url)
-        for entry in feed.entries:
-            guid = getattr(entry, "id", None) or getattr(entry, "link", None)
-            if not guid:
-                continue
+        for e in feed.entries[:10]:
+            title = getattr(e, "title", "")
+            summary = getattr(e, "summary", "")
 
-            items.append({
-                "guid": guid,
-                "title": entry.title,
-                "link": getattr(entry, "link", ""),
-                "source": url
-            })
+            if title:
+                items.append({
+                    "title": title,
+                    "summary": summary
+                })
 
     return items
 
 
-# =========================
-# AI (with fallback + retry)
-# =========================
-
-def generate_text(title):
-    prompt = f"""
-Ты финансовый редактор premium newsroom.
-
-Перепиши новость профессионально, кратко и понятно на русском.
-
-Заголовок:
-{title}
-
-Требования:
-- 1–2 предложения
-- без воды
-- без повторов
-- финансовый стиль
-"""
-
-    last_error = None
-
-    for attempt in range(3):
-        try:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt
-            )
-
-            text = (response.text or "").strip()
-
-            if len(text) < 10:
-                raise ValueError("Empty AI response")
-
-            return text
-
-        except Exception as e:
-            last_error = e
-            logging.warning(f"Gemini attempt {attempt+1} failed: {e}")
-            time.sleep(2 + attempt * 2)
-
-    # fallback если AI умер
-    logging.error(f"Gemini failed permanently: {last_error}")
-    return f"Краткая сводка: {title}"
-
-
-# =========================
+# ======================
 # TELEGRAM
-# =========================
-
-def send_post(text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+# ======================
+def send_telegram(text: str):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
     payload = {
-        "chat_id": CHANNEL_ID,
+        "chat_id": TELEGRAM_CHANNEL_ID,
         "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
+        "parse_mode": "Markdown"
     }
 
-    r = requests.post(url, json=payload, timeout=15)
-    if not r.ok:
-        logging.error(f"Telegram error: {r.text}")
+    requests.post(url, json=payload, timeout=20)
 
 
-# =========================
-# FORMAT POST
-# =========================
-
-def format_post(item, text):
-    tag = "#markets"
-
-    return (
-        f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Investing-24:\n"
-        f"{text}\n\n"
-        f"{tag}"
-    )
-
-
-# =========================
+# ======================
 # MAIN
-# =========================
-
+# ======================
 def main():
-    posted = load_posted()
     news = fetch_news()
-
-    random.shuffle(news)
-
-    sent = 0
+    posted = 0
 
     for item in news:
-        if item["guid"] in posted:
+        title = item["title"]
+        summary = item["summary"]
+
+        logging.info(f"Processing: {title}")
+
+        rewritten = rewrite_news(title, summary)
+        cleaned = clean_text(rewritten)
+
+        if not is_valid(cleaned):
+            logging.warning("Skipped invalid post")
             continue
 
-        logging.info(f"Processing: {item['title']}")
+        # финальный формат поста
+        final_post = f"{cleaned}\n\n#markets"
 
-        text = generate_text(item["title"])
+        send_telegram(final_post)
+        posted += 1
 
-        # защита от пустоты
-        if not text or len(text.strip()) < 5:
-            text = f"Финансовая новость: {item['title']}"
-
-        post = format_post(item, text)
-
-        send_post(post)
-
-        posted.add(item["guid"])
-        sent += 1
-
-        time.sleep(3)
-
-        if sent >= 10:
-            break
-
-    save_posted(posted)
-    logging.info(f"Done. posted={sent}")
+    logging.info(f"Done. posted={posted}")
 
 
 if __name__ == "__main__":

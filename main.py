@@ -25,7 +25,7 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 DATA_FILE = "posted_guids.json"
 RETRY_FILE = "retry_queue.json"      # файл для отложенных новостей
 MAX_RETRIES = 3                       # максимальное число повторных попыток
-MAX_ITEMS_PER_RUN = 2
+MAX_ITEMS_PER_RUN = 3
 LOG_FILE = "bot.log"
 
 logging.basicConfig(

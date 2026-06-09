@@ -3,7 +3,10 @@ name: Investing-24 Bot
 on:
   workflow_dispatch:
   schedule:
-  - cron: "0 */2 * * *"
+    - cron: "0 */2 * * *"   # каждые 2 часа
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # подавляет предупреждение Node.js 20
 
 permissions:
   contents: write

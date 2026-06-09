@@ -1,14 +1,22 @@
-import os, json, time, logging, sys, re, hashlib
+import os
+import json
+import time
+import logging
+import hashlib
+import re
+import sys
+
 import feedparser
 import requests
 import cloudscraper
+
 from bs4 import BeautifulSoup
 from readability import Document
+
 from google import genai
-from google.genai import types
 
 RSS_URLS = [
-    "https://1prime.ru/export/rss2/index.xml",
+    "https://1prime.ru/export/rss2/index.xml"
 ]
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -27,342 +35,324 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
-logger = logging.getLogger()
+
+logger = logging.getLogger(__name__)
 
 scraper = cloudscraper.create_scraper()
 
-# ---------- GUID ----------
+
+# ---------------- GUID ----------------
+
 def load_posted_guids():
     if not os.path.exists(DATA_FILE):
         return set()
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        raw = f.read().strip()
-    if not raw:
-        logger.warning("posted_guids.json пуст, начинаю с чистого списка.")
-        return set()
+
     try:
-        data = json.loads(raw)
-        return set(data[-1000:])
-    except json.JSONDecodeError:
-        logger.error("Ошибка в JSON, сбрасываю список.")
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    except Exception:
         return set()
+
 
 def save_posted_guids(guids):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(guids), f)
+        json.dump(list(guids), f, ensure_ascii=False)
+
 
 def make_guid(entry):
-    if hasattr(entry, "id") and entry.id:
+    if getattr(entry, "id", None):
         return entry.id
-    raw = entry.link + entry.get("title", "")
-    return hashlib.md5(raw.encode()).hexdigest()
 
-# ---------- RSS ----------
+    return hashlib.md5(
+        (entry.link + entry.get("title", "")).encode("utf-8")
+    ).hexdigest()
+
+
+# ---------------- RSS ----------------
+
 def fetch_rss(url):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
-        resp = requests.get(url, headers=headers, timeout=20)
-        resp.raise_for_status()
-        return resp.content
+        r = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=20
+        )
+        r.raise_for_status()
+        return r.content
     except Exception as e:
-        logger.error(f"Не удалось скачать RSS {url}: {e}")
+        logger.error(f"RSS error: {e}")
         return None
+
 
 def get_all_entries():
-    all_entries = []
+    entries = []
+
     for url in RSS_URLS:
         content = fetch_rss(url)
-        if content is None:
-            continue
-        feed = feedparser.parse(content)
-        if feed.bozo:
-            logger.error(f"Ошибка парсинга RSS {url}: {feed.bozo_exception}")
-        logger.info(f"Лента {url} содержит {len(feed.entries)} новостей.")
-        for entry in feed.entries:
-            all_entries.append((entry, url))
-    return all_entries
 
-# ---------- изображение ----------
+        if not content:
+            continue
+
+        feed = feedparser.parse(content)
+
+        logger.info(
+            f"Получено {len(feed.entries)} записей из {url}"
+        )
+
+        for item in feed.entries:
+            entries.append(item)
+
+    return entries
+
+
+# ---------------- IMAGE ----------------
+
 def extract_image(entry):
-    if hasattr(entry, "enclosures") and entry.enclosures:
-        enc = entry.enclosures[0]
-        if "image" in enc.get("type", ""):
-            return enc.href
-    if hasattr(entry, "media_content") and entry.media_content:
-        for media in entry.media_content:
-            if "image" in media.get("type", ""):
-                return media.get("url")
     try:
-        resp = requests.get(entry.link, timeout=15, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"
-        })
-        soup = BeautifulSoup(resp.text, "html.parser")
-        og_img = soup.find("meta", property="og:image")
-        if og_img and og_img.get("content"):
-            return og_img["content"]
-    except Exception as e:
-        logger.warning(f"Не удалось извлечь изображение: {e}")
+        if hasattr(entry, "enclosures"):
+            for enc in entry.enclosures:
+                if "image" in enc.get("type", ""):
+                    return enc.href
+    except:
+        pass
+
+    try:
+        if hasattr(entry, "media_content"):
+            for media in entry.media_content:
+                return media.get("url")
+    except:
+        pass
+
+    try:
+        page = requests.get(
+            entry.link,
+            timeout=15,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+
+        soup = BeautifulSoup(page.text, "html.parser")
+
+        og = soup.find("meta", property="og:image")
+
+        if og:
+            return og.get("content")
+    except:
+        pass
+
     return None
 
-# ---------- мусорная строка ----------
-def is_garbage_line(line):
-    line = line.strip()
-    if not line:
-        return True
-    if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', line):
-        return True
-    if re.search(r'(\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{2,4}[-.\s]?\d{2,4}', line):
-        return True
-    if re.search(r'ФГУП|МИА|Россия сегодня|internet-group|РИА Новости|ПРАЙМ', line, re.IGNORECASE):
-        return True
-    if re.search(r'\d{1,2}\s+\w+|\d{4}', line) and re.search(r'МОСКВА|ПРАЙМ', line, re.IGNORECASE):
-        return True
-    if re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{4}', line):
-        return True
-    if re.fullmatch(r'\d{2}\.\d{2}\.\d{4}', line):
-        return True
-    if re.fullmatch(r'20\d{2}', line):
-        return True
-    if re.fullmatch(r'\d{4}', line):
-        return True
-    if re.match(r'https?://\S+', line):
-        return True
-    if line.startswith('—') or line.startswith('- '):
-        return True
-    if line and line[0] in ',.;:!?':
-        return True
-    parts = [p.strip() for p in line.split(',') if p.strip()]
-    if len(parts) >= 2 and all(len(w) < 25 for w in parts):
-        if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают', 'ил', 'ел', 'ет', 'ит', 'ут', 'ют')) for w in parts):
-            return True
-    words = line.split()
-    if 1 <= len(words) <= 3 and all(len(w) < 20 for w in words):
-        if not any(w[0].isdigit() for w in words):
-            if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают', 'ил', 'ел', 'ет', 'ит', 'ут', 'ют')) for w in words):
-                return True
-    return False
 
-def clean_text(raw_text, title=""):
-    lines = raw_text.splitlines()
-    cleaned = []
-    prev_ended = True
-    for line in lines:
+# ---------------- CLEAN ----------------
+
+def clean_text(text):
+    lines = []
+
+    for line in text.splitlines():
+
         line = line.strip()
+
         if not line:
             continue
-        if is_garbage_line(line):
-            continue
-        if line and line[0].islower() and prev_ended:
-            continue
-        if title and line.lower() == title.lower():
-            continue
-        cleaned.append(line)
-        prev_ended = line.endswith(('.', '!', '?'))
-    return "\n".join(cleaned)
 
-def has_verb(line):
-    return any(w.endswith(('ет', 'ит', 'ут', 'ют', 'ал', 'ил', 'ел', 'ть', 'чь', 'ся', 'сь', 'ете', 'ают', 'яют', 'ует', 'ирует')) for w in line.split())
-
-def filter_body_lines(text):
-    lines = text.splitlines()
-    result = []
-    for line in lines:
-        line = line.strip()
-        if not line or is_garbage_line(line):
+        if len(line) < 20:
             continue
-        if len(line) > 60 or has_verb(line) or line.startswith('"') or line.startswith('«'):
-            result.append(line)
-    return "\n".join(result)
 
-def extract_article_text(url, fallback_description=""):
+        if "ria.ru" in line.lower():
+            continue
+
+        if "прайм" in line.lower():
+            continue
+
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+# ---------------- ARTICLE ----------------
+
+def extract_article_text(url, fallback=""):
     try:
-        resp = scraper.get(url, timeout=15)
-        resp.raise_for_status()
-        doc = Document(resp.text)
-        soup = BeautifulSoup(doc.summary(), "html.parser")
-        for tag in soup(["script", "style", "img", "figure", "figcaption"]):
+        response = scraper.get(url, timeout=20)
+
+        doc = Document(response.text)
+
+        soup = BeautifulSoup(
+            doc.summary(),
+            "html.parser"
+        )
+
+        for tag in soup(
+            ["script", "style", "img", "figure"]
+        ):
             tag.decompose()
-        text = soup.get_text(separator="\n", strip=True)
+
+        text = soup.get_text(
+            separator="\n",
+            strip=True
+        )
+
         if len(text) > 200:
-            logger.info("Полный текст получен.")
-            return text[:9000]
+            return text[:8000]
+
     except Exception as e:
-        logger.warning(f"Ошибка cloudscraper: {e}")
-    if fallback_description and len(fallback_description.strip()) > 30:
-        logger.info("Использую описание из RSS.")
-        return fallback_description.strip()[:9000]
+        logger.warning(f"Article parse error: {e}")
+
+    return fallback[:8000]
+
+
+# ---------------- GEMINI ----------------
+
+def ai_rewrite(text):
+    try:
+        client = genai.Client(
+            api_key=GEMINI_API_KEY
+        )
+
+        prompt = f"""
+Ты финансовый редактор Telegram-канала Investing-24.
+
+Полностью перепиши новость.
+
+Требования:
+
+- Новый стиль изложения
+- Не копируй оригинальные предложения
+- Сохрани факты и цифры
+- Добавь подходящие эмодзи
+- До 800 символов
+- Без упоминания источника
+- В конце добавь:
+
+📢 Подписывайтесь: @Investing_24
+
+Текст:
+
+{text}
+"""
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=prompt
+        )
+
+        if response.text:
+            return response.text.strip()
+
+    except Exception as e:
+        logger.error(f"Gemini error: {e}")
+
     return None
 
-def add_emoji_prefix(text):
-    lower = text.lower()
-    if any(w in lower for w in ['акци', 'биржа', 'индекс', 'торг', 's&p', 'nasdaq', 'инвест']):
-        return "📈 " + text
-    if any(w in lower for w in ['нефть', 'газ', 'топлив', 'энерг']):
-        return "🛢️ " + text
-    if any(w in lower for w in ['золот', 'серебр', 'драгметалл']):
-        return "💰 " + text
-    if any(w in lower for w in ['банк', 'кредит', 'финанс', 'втб', 'сбер']):
-        return "🏦 " + text
-    if any(w in lower for w in ['доллар', 'валюта', 'рубл']):
-        return "💵 " + text
-    return "🔹 " + text
 
-# ---------- ИИ-рерайт (исправлено: без api_version, модель gemini-1.5-flash) ----------
-def ai_rewrite(original_text, image_url=None):
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        prompt = (
-            "Ты — редактор телеграм-канала. Полностью переработай эту новость так, "
-            "чтобы она отличалась от оригинала на 100% по стилю, лексике и построению предложений. "
-            "Используй совершенно другие формулировки, синонимы, измени порядок подачи фактов. "
-            "Ни одна фраза из исходного текста не должна повторяться дословно. "
-            "Сохрани только точные цифры и факты. "
-            "Добавь эмодзи, сделай пост ярким и лаконичным (до 800 символов). "
-            "Не упоминай источник и дату. "
-            "Закончи призывом подписаться на канал @Investing_24.\n\n"
-            f"Исходная статья:\n{original_text}"
-        )
-        config = types.GenerateContentConfig(
-            temperature=0.9,
-            top_p=0.95,
-            max_output_tokens=800,
-        )
-       response = client.models.generate_content(
-    model="gemini-2.5-flash-lite",
-    contents=prompt
-)
-        if response.text:
-            logger.info("ИИ успешно переписал текст.")
-            return response.text.strip()
-        else:
-            logger.error("Gemini вернул пустой ответ.")
-            return None
-    except Exception as e:
-        logger.error(f"Ошибка Gemini API: {e}")
-        return None
+# ---------------- TELEGRAM ----------------
 
-def send_telegram_post(text, image_url):
+def send_post(text, image_url=None):
+
     base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-    if image_url:
-        payload = {"chat_id": CHANNEL_ID, "photo": image_url, "caption": text, "parse_mode": "HTML"}
-        method = "sendPhoto"
-    else:
-        payload = {"chat_id": CHANNEL_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-        method = "sendMessage"
+
     try:
-        resp = requests.post(f"{base}/{method}", data=payload, timeout=20)
-        resp.raise_for_status()
-        result = resp.json()
-        if not result.get("ok"):
-            logger.error(f"Telegram API ошибка: {result}")
-            return False
-        logger.info("Пост отправлен.")
+
+        if image_url:
+
+            result = requests.post(
+                f"{base}/sendPhoto",
+                data={
+                    "chat_id": CHANNEL_ID,
+                    "photo": image_url,
+                    "caption": text[:1024]
+                },
+                timeout=30
+            )
+
+        else:
+
+            result = requests.post(
+                f"{base}/sendMessage",
+                data={
+                    "chat_id": CHANNEL_ID,
+                    "text": text,
+                    "disable_web_page_preview": True
+                },
+                timeout=30
+            )
+
+        result.raise_for_status()
+
         return True
+
     except Exception as e:
-        logger.error(f"Ошибка отправки: {e}")
+
+        logger.error(f"Telegram error: {e}")
+
         return False
 
-def trim_text(text, max_len=900):
-    if len(text) <= max_len:
-        return text
-    cut = text[:max_len]
-    for sep in ['.', '!', '?']:
-        pos = cut.rfind(sep)
-        if pos > 400:
-            return cut[:pos+1]
-    last_space = cut.rfind(' ')
-    return cut[:last_space] + "…" if last_space > 0 else cut + "…"
 
-# ---------- главный цикл ----------
+# ---------------- MAIN ----------------
+
 def main():
-    logger.info("=== Запуск бота ===")
+
+    logger.info("=== START ===")
+
     posted = load_posted_guids()
-    all_entries = get_all_entries()
-    if not all_entries:
-        logger.warning("Новостей нет. Выход.")
-        return
 
-    logger.info(f"Всего записей из {len(RSS_URLS)} лент: {len(all_entries)}, уже обработано: {len(posted)}.")
-    new_items = 0
+    entries = get_all_entries()
 
-    for entry, rss_url in all_entries:
+    new_posts = 0
+
+    for entry in entries:
+
         guid = make_guid(entry)
+
         if guid in posted:
             continue
-        if new_items >= MAX_ITEMS_PER_RUN:
+
+        if new_posts >= MAX_ITEMS_PER_RUN:
             break
 
-        original_title = entry.get("title", "")
-        logger.info(f"Обрабатываю ({rss_url}): {original_title}")
+        title = entry.get("title", "")
 
-        image_url = extract_image(entry)
-        description = entry.get("description", "")
-        raw_text = extract_article_text(entry.link, fallback_description=description)
-        if not raw_text:
-            raw_text = original_title
+        logger.info(f"Новость: {title}")
 
-        cleaned_text = clean_text(raw_text, title=original_title)
-        if not cleaned_text:
-            cleaned_text = original_title
+        description = entry.get(
+            "description",
+            ""
+        )
 
-        title = original_title
-        if is_garbage_line(title):
-            lines = cleaned_text.splitlines()
-            new_title = ""
-            for i, line in enumerate(lines):
-                if line and not is_garbage_line(line) and line[0].isupper():
-                    new_title = line
-                    lines.pop(i)
-                    cleaned_text = "\n".join(lines) if lines else ""
-                    break
-            if new_title:
-                title = new_title
+        article = extract_article_text(
+            entry.link,
+            description
+        )
 
-        cleaned_lines = cleaned_text.splitlines()
-        filtered = []
-        for line in cleaned_lines:
-            if title and line.lower().startswith(title.lower()):
-                continue
-            if original_title and line.lower().startswith(original_title.lower()):
-                continue
-            filtered.append(line)
-        cleaned_text = "\n".join(filtered)
+        article = clean_text(article)
 
-        rewritten = ai_rewrite(cleaned_text, image_url)
-        if rewritten:
-            post = rewritten
-            logger.info("Пост сгенерирован ИИ.")
-        else:
-            logger.warning("ИИ не сработал – использую fallback.")
-            body = filter_body_lines(cleaned_text)
-            body = trim_text(body, 800) if body else ""
-            if not body and cleaned_text:
-                for line in cleaned_text.splitlines():
-                    if line and not is_garbage_line(line):
-                        body = line
-                        break
-                if body:
-                    body = trim_text(body, 800)
-            post = add_emoji_prefix(title)
-            if body:
-                post += "\n\n" + body
-            if "@Investing_24" not in post:
-                post += "\n\nПодпишись на канал @Investing_24"
+        if not article:
+            article = title
 
-        success = send_telegram_post(post, image_url)
-        if success:
+        rewritten = ai_rewrite(article)
+
+        if not rewritten:
+            rewritten = f"📈 {title}\n\n📢 Подписывайтесь: @Investing_24"
+
+        image = extract_image(entry)
+
+        if send_post(rewritten, image):
+
             posted.add(guid)
-            new_items += 1
-            save_posted_guids(posted)
-            logger.info(f"GUID {guid} сохранён. Всего обработано: {len(posted)}.")
-            time.sleep(2)
-        else:
-            logger.error(f"Не удалось отправить пост для {entry.link}")
 
-    if new_items == 0:
-        logger.info("Новых постов нет.")
-    else:
-        logger.info(f"Добавлено {new_items} постов.")
+            save_posted_guids(posted)
+
+            new_posts += 1
+
+            logger.info(
+                f"Опубликовано: {title}"
+            )
+
+            time.sleep(3)
+
+    logger.info(
+        f"Готово. Добавлено {new_posts} постов."
+    )
+
 
 if __name__ == "__main__":
     main()

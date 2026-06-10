@@ -3,10 +3,10 @@ name: Investing-24 Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */2 * * *"   # каждые 2 часа
+    - cron: "0 */2 * * *"
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # подавляет предупреждение Node.js 20
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
   contents: write
@@ -40,6 +40,7 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add posted_guids.json || true
+          git pull --rebase origin main || true
+          git add posted_guids.json retry_queue.json || true
           git commit -m "update posted guids" || exit 0
           git push

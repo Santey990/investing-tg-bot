@@ -15,7 +15,10 @@ from readability import Document
 
 # ==================== CONFIG ====================
 RSS_URLS = [
-    "https://1prime.ru/export/rss2/index.xml"
+    "https://1prime.ru/export/rss2/index.xml",          # 1prime (основной)
+    "https://www.vedomosti.ru/rss/issue.xml",           # Ведомости
+    "https://www.finmarket.ru/rss/mainnews.asp",        # Финмаркет
+    "http://www.cbr.ru/rss/RssNews",                    # Банк России
 ]
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -25,7 +28,7 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 DATA_FILE = "posted_guids.json"
 RETRY_FILE = "retry_queue.json"
 MAX_RETRIES = 3
-MAX_ITEMS_PER_RUN = 3          # <--- изменено с 2 на 3
+MAX_ITEMS_PER_RUN = 3          # 3 новости за запуск
 LOG_FILE = "bot.log"
 
 logging.basicConfig(

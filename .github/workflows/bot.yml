@@ -40,7 +40,7 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git pull --rebase origin main || true
           git add posted_guids.json retry_queue.json || true
+          git pull --rebase origin main || true
           git commit -m "update posted guids" || exit 0
           git push

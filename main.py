@@ -27,7 +27,7 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 DATA_FILE = "posted_guids.json"
 RETRY_FILE = "retry_queue.json"
 MAX_RETRIES = 3
-MAX_ITEMS_PER_RUN = 3          # 3 поста за запуск – строгое ограничение
+MAX_ITEMS_PER_RUN = 3          # Строго 3 поста за запуск
 LOG_FILE = "bot.log"
 
 logging.basicConfig(
@@ -268,10 +268,10 @@ def add_to_retry_queue(guid, entry_data):
         }
     save_retry_queue(queue)
 
-# ==================== TELEGRAM (исправленная отправка) ====================
+# ==================== TELEGRAM (с fallback при ошибке фото) ====================
 def send_post(text, image_url=None):
     base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-    # Функция для отправки только текста
+    
     def send_text_only():
         result = requests.post(
             f"{base}/sendMessage",
@@ -283,14 +283,12 @@ def send_post(text, image_url=None):
 
     try:
         if image_url:
-            # Пытаемся отправить с фото
             result = requests.post(
                 f"{base}/sendPhoto",
                 data={"chat_id": CHANNEL_ID, "photo": image_url, "caption": text[:1024]},
                 timeout=30
             )
             if result.status_code == 400:
-                # Если 400 – пробуем отправить только текст
                 logger.warning(f"Фото не принято (400), отправляю без фото: {image_url[:100]}")
                 return send_text_only()
             result.raise_for_status()
@@ -298,7 +296,6 @@ def send_post(text, image_url=None):
             return send_text_only()
         return True
     except Exception as e:
-        # При любой ошибке пытаемся отправить хотя бы текст
         logger.error(f"Ошибка при отправке с фото: {e}, пробую без фото")
         try:
             return send_text_only()
@@ -312,6 +309,7 @@ def main():
     posted = load_posted_guids()
     retry_queue = load_retry_queue()
     newly_posted_guids = set()
+    total_published = 0
 
     # 1. Обработка отложенных новостей (не более MAX_ITEMS_PER_RUN)
     retry_processed = 0
@@ -342,6 +340,7 @@ def main():
                 newly_posted_guids.add(guid)
                 del retry_queue[guid]
                 retry_processed += 1
+                total_published += 1
                 logger.info(f"Отложенная новость опубликована с пересказом: {title}")
         else:
             if attempts >= MAX_RETRIES:
@@ -352,6 +351,7 @@ def main():
                     newly_posted_guids.add(guid)
                     del retry_queue[guid]
                     retry_processed += 1
+                    total_published += 1
                     logger.warning(f"Отложенная новость опубликована как fallback после {MAX_RETRIES} попыток: {title}")
             else:
                 retry_queue[guid]["attempts"] = attempts + 1
@@ -361,45 +361,47 @@ def main():
 
     save_retry_queue(retry_queue)
 
-    # 2. Обработка свежих новостей из RSS (не более MAX_ITEMS_PER_RUN - retry_processed)
-    entries = get_all_entries()
-    new_posts = 0
-    remaining_slots = MAX_ITEMS_PER_RUN - retry_processed
+    # 2. Обработка свежих новостей из RSS (не более оставшихся слотов)
+    remaining_slots = MAX_ITEMS_PER_RUN - total_published
+    if remaining_slots > 0:
+        entries = get_all_entries()
+        new_posts = 0
 
-    for entry in entries:
-        if new_posts >= remaining_slots:
-            break
-        guid = make_guid(entry)
-        if guid in posted:
-            continue
+        for entry in entries:
+            if new_posts >= remaining_slots:
+                break
+            guid = make_guid(entry)
+            if guid in posted:
+                continue
 
-        title = entry.get("title", "")
-        logger.info(f"Новость: {title}")
+            title = entry.get("title", "")
+            logger.info(f"Новость: {title}")
 
-        description = entry.get("description", "")
-        article = extract_article_text(entry.link, description)
-        article = clean_text(article)
-        if not article:
-            article = title
+            description = entry.get("description", "")
+            article = extract_article_text(entry.link, description)
+            article = clean_text(article)
+            if not article:
+                article = title
 
-        rewritten = ai_rewrite(article)
-        if rewritten:
-            image = extract_image(entry)
-            if send_post(rewritten, image):
-                posted.add(guid)
-                newly_posted_guids.add(guid)
-                new_posts += 1
-                logger.info(f"Опубликовано: {title}")
-        else:
-            add_to_retry_queue(guid, {
-                "title": title,
-                "link": entry.link,
-                "description": description,
-                "published": entry.get("published")
-            })
-            logger.info(f"Новость добавлена в очередь повторных попыток: {title}")
+            rewritten = ai_rewrite(article)
+            if rewritten:
+                image = extract_image(entry)
+                if send_post(rewritten, image):
+                    posted.add(guid)
+                    newly_posted_guids.add(guid)
+                    new_posts += 1
+                    total_published += 1
+                    logger.info(f"Опубликовано: {title}")
+            else:
+                add_to_retry_queue(guid, {
+                    "title": title,
+                    "link": entry.link,
+                    "description": description,
+                    "published": entry.get("published")
+                })
+                logger.info(f"Новость добавлена в очередь повторных попыток: {title}")
 
-        time.sleep(3)
+            time.sleep(3)
 
     # 3. Сохранение состояния
     if newly_posted_guids:
@@ -408,7 +410,7 @@ def main():
         logger.info(f"Сохранено {len(newly_posted_guids)} новых GUID")
 
     queue_remaining = len(load_retry_queue())
-    logger.info(f"Готово. Добавлено {new_posts + retry_processed} постов. В очереди осталось {queue_remaining}.")
+    logger.info(f"Готово. Добавлено {total_published} постов. В очереди осталось {queue_remaining}.")
 
 if __name__ == "__main__":
     main()

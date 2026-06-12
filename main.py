@@ -15,7 +15,6 @@ from readability import Document
 
 # ==================== CONFIG ====================
 RSS_URLS = [
-    "https://1prime.ru/export/rss2/index.xml",          # 1prime (основной)
     "https://www.vedomosti.ru/rss/issue.xml",           # Ведомости
     "https://www.finmarket.ru/rss/mainnews.asp",        # Финмаркет
     "http://www.cbr.ru/rss/RssNews",                    # Банк России
@@ -28,7 +27,7 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 DATA_FILE = "posted_guids.json"
 RETRY_FILE = "retry_queue.json"
 MAX_RETRIES = 3
-MAX_ITEMS_PER_RUN = 3          # 3 новости за запуск
+MAX_ITEMS_PER_RUN = 3
 LOG_FILE = "bot.log"
 
 logging.basicConfig(
@@ -151,7 +150,7 @@ def extract_article_text(url, fallback=""):
         logger.warning(f"Article parse error: {e}")
     return fallback[:8000]
 
-# ==================== AI через OpenRouter (только рабочие модели) ====================
+# ==================== AI через OpenRouter ====================
 OPENROUTER_MODELS = [
     "openai/gpt-oss-120b:free",
     "google/gemma-4-31b-it:free",

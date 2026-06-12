@@ -15,9 +15,9 @@ from readability import Document
 
 # ==================== CONFIG ====================
 RSS_URLS = [
-    "https://www.vedomosti.ru/rss/issue.xml",           # Ведомости
-    "https://www.finmarket.ru/rss/mainnews.asp",        # Финмаркет
-    "http://www.cbr.ru/rss/RssNews",                    # Банк России
+    "https://www.vedomosti.ru/rss/issue.xml",
+    "https://www.finmarket.ru/rss/mainnews.asp",
+    "http://www.cbr.ru/rss/RssNews",
 ]
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -27,7 +27,7 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 DATA_FILE = "posted_guids.json"
 RETRY_FILE = "retry_queue.json"
 MAX_RETRIES = 3
-MAX_ITEMS_PER_RUN = 3
+MAX_ITEMS_PER_RUN = 3          # 3 поста за запуск – строгое ограничение
 LOG_FILE = "bot.log"
 
 logging.basicConfig(
@@ -268,27 +268,43 @@ def add_to_retry_queue(guid, entry_data):
         }
     save_retry_queue(queue)
 
-# ==================== TELEGRAM ====================
+# ==================== TELEGRAM (исправленная отправка) ====================
 def send_post(text, image_url=None):
     base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+    # Функция для отправки только текста
+    def send_text_only():
+        result = requests.post(
+            f"{base}/sendMessage",
+            data={"chat_id": CHANNEL_ID, "text": text, "disable_web_page_preview": True},
+            timeout=30
+        )
+        result.raise_for_status()
+        return True
+
     try:
         if image_url:
+            # Пытаемся отправить с фото
             result = requests.post(
                 f"{base}/sendPhoto",
                 data={"chat_id": CHANNEL_ID, "photo": image_url, "caption": text[:1024]},
                 timeout=30
             )
+            if result.status_code == 400:
+                # Если 400 – пробуем отправить только текст
+                logger.warning(f"Фото не принято (400), отправляю без фото: {image_url[:100]}")
+                return send_text_only()
+            result.raise_for_status()
         else:
-            result = requests.post(
-                f"{base}/sendMessage",
-                data={"chat_id": CHANNEL_ID, "text": text, "disable_web_page_preview": True},
-                timeout=30
-            )
-        result.raise_for_status()
+            return send_text_only()
         return True
     except Exception as e:
-        logger.error(f"Telegram error: {e}")
-        return False
+        # При любой ошибке пытаемся отправить хотя бы текст
+        logger.error(f"Ошибка при отправке с фото: {e}, пробую без фото")
+        try:
+            return send_text_only()
+        except Exception as e2:
+            logger.error(f"Не удалось отправить даже текст: {e2}")
+            return False
 
 # ==================== MAIN ====================
 def main():
@@ -297,8 +313,11 @@ def main():
     retry_queue = load_retry_queue()
     newly_posted_guids = set()
 
-    # 1. Обработка отложенных новостей
+    # 1. Обработка отложенных новостей (не более MAX_ITEMS_PER_RUN)
+    retry_processed = 0
     for guid, data in list(retry_queue.items()):
+        if retry_processed >= MAX_ITEMS_PER_RUN:
+            break
         if guid in posted:
             del retry_queue[guid]
             continue
@@ -322,6 +341,7 @@ def main():
                 posted.add(guid)
                 newly_posted_guids.add(guid)
                 del retry_queue[guid]
+                retry_processed += 1
                 logger.info(f"Отложенная новость опубликована с пересказом: {title}")
         else:
             if attempts >= MAX_RETRIES:
@@ -331,6 +351,7 @@ def main():
                     posted.add(guid)
                     newly_posted_guids.add(guid)
                     del retry_queue[guid]
+                    retry_processed += 1
                     logger.warning(f"Отложенная новость опубликована как fallback после {MAX_RETRIES} попыток: {title}")
             else:
                 retry_queue[guid]["attempts"] = attempts + 1
@@ -340,16 +361,17 @@ def main():
 
     save_retry_queue(retry_queue)
 
-    # 2. Обработка свежих новостей из RSS
+    # 2. Обработка свежих новостей из RSS (не более MAX_ITEMS_PER_RUN - retry_processed)
     entries = get_all_entries()
     new_posts = 0
+    remaining_slots = MAX_ITEMS_PER_RUN - retry_processed
 
     for entry in entries:
+        if new_posts >= remaining_slots:
+            break
         guid = make_guid(entry)
         if guid in posted:
             continue
-        if new_posts >= MAX_ITEMS_PER_RUN:
-            break
 
         title = entry.get("title", "")
         logger.info(f"Новость: {title}")
@@ -386,7 +408,7 @@ def main():
         logger.info(f"Сохранено {len(newly_posted_guids)} новых GUID")
 
     queue_remaining = len(load_retry_queue())
-    logger.info(f"Готово. В очереди осталось {queue_remaining} необработанных новостей.")
+    logger.info(f"Готово. Добавлено {new_posts + retry_processed} постов. В очереди осталось {queue_remaining}.")
 
 if __name__ == "__main__":
     main()

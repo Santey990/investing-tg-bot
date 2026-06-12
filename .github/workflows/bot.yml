@@ -42,5 +42,4 @@ jobs:
           git config user.email "github-actions@github.com"
           git add posted_guids.json retry_queue.json || true
           git commit -m "update posted guids" || exit 0
-          git pull --rebase origin main || true
           git push

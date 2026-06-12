@@ -17,7 +17,6 @@ from readability import Document
 RSS_URLS = [
     "https://www.vedomosti.ru/rss/issue.xml",
     "https://www.finmarket.ru/rss/mainnews.asp",
-    "http://www.cbr.ru/rss/RssNews",
 ]
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -27,7 +26,7 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 DATA_FILE = "posted_guids.json"
 RETRY_FILE = "retry_queue.json"
 MAX_RETRIES = 3
-MAX_ITEMS_PER_RUN = 3          # Строго 3 поста за запуск
+MAX_ITEMS_PER_RUN = 3
 LOG_FILE = "bot.log"
 
 logging.basicConfig(
@@ -268,11 +267,27 @@ def add_to_retry_queue(guid, entry_data):
         }
     save_retry_queue(queue)
 
-# ==================== TELEGRAM (с fallback при ошибке фото) ====================
+# ==================== TELEGRAM (исправленная отправка) ====================
 def send_post(text, image_url=None):
     base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     
-    def send_text_only():
+    # Сначала пробуем отправить с фото (если есть)
+    if image_url and isinstance(image_url, str) and image_url.startswith(('http://', 'https://')):
+        try:
+            result = requests.post(
+                f"{base}/sendPhoto",
+                data={"chat_id": CHANNEL_ID, "photo": image_url, "caption": text[:1024]},
+                timeout=30
+            )
+            if result.status_code == 200:
+                return True
+            else:
+                logger.warning(f"Фото не отправилось (код {result.status_code}), пробую без фото")
+        except Exception as e:
+            logger.error(f"Ошибка при отправке фото: {e}, пробую без фото")
+    
+    # Отправляем только текст
+    try:
         result = requests.post(
             f"{base}/sendMessage",
             data={"chat_id": CHANNEL_ID, "text": text, "disable_web_page_preview": True},
@@ -280,28 +295,9 @@ def send_post(text, image_url=None):
         )
         result.raise_for_status()
         return True
-
-    try:
-        if image_url:
-            result = requests.post(
-                f"{base}/sendPhoto",
-                data={"chat_id": CHANNEL_ID, "photo": image_url, "caption": text[:1024]},
-                timeout=30
-            )
-            if result.status_code == 400:
-                logger.warning(f"Фото не принято (400), отправляю без фото: {image_url[:100]}")
-                return send_text_only()
-            result.raise_for_status()
-        else:
-            return send_text_only()
-        return True
     except Exception as e:
-        logger.error(f"Ошибка при отправке с фото: {e}, пробую без фото")
-        try:
-            return send_text_only()
-        except Exception as e2:
-            logger.error(f"Не удалось отправить даже текст: {e2}")
-            return False
+        logger.error(f"Не удалось отправить даже текст: {e}")
+        return False
 
 # ==================== MAIN ====================
 def main():
@@ -311,7 +307,7 @@ def main():
     newly_posted_guids = set()
     total_published = 0
 
-    # 1. Обработка отложенных новостей (не более MAX_ITEMS_PER_RUN)
+    # 1. Обработка отложенных новостей
     retry_processed = 0
     for guid, data in list(retry_queue.items()):
         if retry_processed >= MAX_ITEMS_PER_RUN:
@@ -361,7 +357,7 @@ def main():
 
     save_retry_queue(retry_queue)
 
-    # 2. Обработка свежих новостей из RSS (не более оставшихся слотов)
+    # 2. Обработка свежих новостей из RSS
     remaining_slots = MAX_ITEMS_PER_RUN - total_published
     if remaining_slots > 0:
         entries = get_all_entries()

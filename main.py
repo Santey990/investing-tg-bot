@@ -5,6 +5,7 @@ import logging
 import hashlib
 import re
 import sys
+import urllib.parse
 
 import feedparser
 import requests
@@ -210,7 +211,7 @@ def ai_rewrite(text):
                             logger.warning(f"⚠️ Модель {model_name} вернула нестроковое значение: {content} (попытка {attempt})")
                     except (KeyError, IndexError, TypeError) as e:
                         logger.warning(f"⚠️ Модель {model_name} вернула неожиданный формат: {e} (попытка {attempt})")
-                    
+
                     if attempt == 1:
                         time.sleep(3)
                         continue
@@ -268,28 +269,66 @@ def add_to_retry_queue(guid, entry_data):
     save_retry_queue(queue)
 
 # ==================== TELEGRAM (исправленная отправка) ====================
+def send_photo_as_file(image_url, caption):
+    """
+    Скачивает изображение из интернета и загружает в Telegram как файл.
+    """
+    try:
+        # Шаг 1: Скачиваем содержимое изображения
+        response = requests.get(image_url, timeout=30, stream=True)
+        response.raise_for_status()
+        content_type = response.headers.get('content-type', '')
+
+        # Определяем расширение файла
+        ext = 'jpg'  # по умолчанию
+        if 'png' in content_type:
+            ext = 'png'
+        elif 'gif' in content_type:
+            ext = 'gif'
+        elif 'webp' in content_type:
+            ext = 'webp'
+
+        # Шаг 2: Подготавливаем файл для отправки
+        files = {
+            'photo': (f'image.{ext}', response.content, content_type)
+        }
+        data = {'chat_id': CHANNEL_ID, 'caption': caption[:1024]}
+
+        # Шаг 3: Отправляем файл в Telegram
+        result = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+            files=files,
+            data=data,
+            timeout=45
+        )
+        result.raise_for_status()
+        return True
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Ошибка при скачивании или отправке файла: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Неизвестная ошибка при отправке фото как файла: {e}")
+        return False
+
 def send_post(text, image_url=None):
-    base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-    
-    # Сначала пробуем отправить с фото (если есть)
+    """
+    Отправляет пост в Telegram.
+    Сначала пытается отправить фото, скачав и загрузив его как файл.
+    В случае неудачи отправляет только текст.
+    """
     if image_url and isinstance(image_url, str) and image_url.startswith(('http://', 'https://')):
-        try:
-            result = requests.post(
-                f"{base}/sendPhoto",
-                data={"chat_id": CHANNEL_ID, "photo": image_url, "caption": text[:1024]},
-                timeout=30
-            )
-            if result.status_code == 200:
-                return True
-            else:
-                logger.warning(f"Фото не отправилось (код {result.status_code}), пробую без фото")
-        except Exception as e:
-            logger.error(f"Ошибка при отправке фото: {e}, пробую без фото")
-    
+        # Пытаемся отправить с фото
+        if send_photo_as_file(image_url, text):
+            return True
+        else:
+            logger.warning("Не удалось отправить фото как файл, пробую отправить только текст")
+    else:
+        logger.info("Нет корректного URL фото, отправляю только текст")
+
     # Отправляем только текст
     try:
         result = requests.post(
-            f"{base}/sendMessage",
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             data={"chat_id": CHANNEL_ID, "text": text, "disable_web_page_preview": True},
             timeout=30
         )

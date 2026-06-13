@@ -14,10 +14,14 @@ from bs4 import BeautifulSoup
 from readability import Document
 
 # ==================== CONFIG ====================
+# Обновленный список из 10 проверенных источников
 RSS_URLS = [
-    "https://1prime.ru/export/rss2/index.xml",           # 1prime (восстановлен)
-    "https://www.vedomosti.ru/rss/issue.xml",            # Ведомости
-    "https://www.finmarket.ru/rss/mainnews.asp",         # Финмаркет
+   
+   
+    "https://forklog.com/feed/",                     # ForkLog
+    "https://coinspot.io/feed/",                     # Coinspot
+    "https://happycoin.club/feed/",                  # Happy Coin News
+    "https://news.bitcoin.com/feed/",                # Bitcoin.com
 ]
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]

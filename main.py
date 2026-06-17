@@ -14,14 +14,18 @@ from bs4 import BeautifulSoup
 from readability import Document
 
 # ==================== CONFIG ====================
-# Обновленный список из 10 проверенных источников
+# Обновленный список из 10 проверенных источников (без HappyCoin)
 RSS_URLS = [
-   
-   
     "https://forklog.com/feed/",                     # ForkLog
     "https://coinspot.io/feed/",                     # Coinspot
-    "https://happycoin.club/feed/",                  # Happy Coin News
     "https://news.bitcoin.com/feed/",                # Bitcoin.com
+    "https://ru.beincrypto.com/feed/",               # BeInCrypto
+    "https://www.rbc.ru/crypto/rss/",                # РБК.Крипто
+    "https://bits.media/feed/",                      # Bits Media
+    "https://www.fxstreet.ru.com/cryptocurrencies/feed/", # FXStreet
+    "https://www.tokeninsight.com/ru/feed/",         # TokenInsight
+    "https://cryptonomist.ch/ru/feed/",              # Cryptonomist (замена HappyCoin)
+    "https://www.bloomberg.com/feed/quote-viewer/rss/", # Bloomberg (экономика)
 ]
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -274,30 +278,37 @@ def add_to_retry_queue(guid, entry_data):
 
 # ==================== TELEGRAM ====================
 def send_photo_as_file(image_url, caption):
-    try:
-        response = requests.get(image_url, timeout=30, stream=True)
-        response.raise_for_status()
-        content_type = response.headers.get('content-type', '')
-        ext = 'jpg'
-        if 'png' in content_type:
-            ext = 'png'
-        elif 'gif' in content_type:
-            ext = 'gif'
-        elif 'webp' in content_type:
-            ext = 'webp'
-        files = {'photo': (f'image.{ext}', response.content, content_type)}
-        data = {'chat_id': CHANNEL_ID, 'caption': caption[:1024]}
-        result = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
-            files=files,
-            data=data,
-            timeout=45
-        )
-        result.raise_for_status()
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка при отправке фото как файла: {e}")
-        return False
+    # Попытка скачать изображение с повторными попытками (если 502)
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(image_url, timeout=30, stream=True)
+            response.raise_for_status()
+            content_type = response.headers.get('content-type', '')
+            ext = 'jpg'
+            if 'png' in content_type:
+                ext = 'png'
+            elif 'gif' in content_type:
+                ext = 'gif'
+            elif 'webp' in content_type:
+                ext = 'webp'
+            files = {'photo': (f'image.{ext}', response.content, content_type)}
+            data = {'chat_id': CHANNEL_ID, 'caption': caption[:1024]}
+            result = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+                files=files,
+                data=data,
+                timeout=45
+            )
+            result.raise_for_status()
+            return True
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"Попытка {attempt+1} загрузки фото не удалась: {e}. Повтор через 2 сек.")
+                time.sleep(2)
+            else:
+                logger.error(f"Ошибка при отправке фото как файла после {max_retries} попыток: {e}")
+    return False
 
 def send_post(text, image_url=None):
     if image_url and isinstance(image_url, str) and image_url.startswith(('http://', 'https://')):

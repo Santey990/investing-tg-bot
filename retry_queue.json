@@ -1,32 +1,4 @@
 {
-  "https://coinspot.io/?p=190754": {
-    "attempts": 2,
-    "title": "Банк Таиланда планирует запустить стейблкоин с привязкой к бату 1:1, общественные консультации назначены на 2026 год",
-    "link": "https://coinspot.io/news/thailand-baht-backed-stablecoin/",
-    "description": "Банк Таиланда готовит новую модель выпуска стейблкоина, который будет полностью обеспечен тайским батом в соотношении 1:1. Перед запуском инициативу вынесут на общественное обсуждение. Консультации планируют провести до конца 2026 года. О проекте рассказал глава регулятора Витай Раттанакорн во время конференции Capital with Purpose, организованной efinanceThai. При этом речь не идёт о запуске цифровой валюты центрального [&#8230;]",
-    "published": "Tue, 30 Jun 2026 13:26:35 +0000"
-  },
-  "https://coinspot.io/?p=190730": {
-    "attempts": 1,
-    "title": "Base раскрыла причину повторных сбоев сети",
-    "link": "https://coinspot.io/news/base-sequencer-outage-postmortem/",
-    "description": "Base объяснила, почему на прошлой неделе сеть дважды переставала выпускать блоки. В техническом разборе команда написала, что причиной стала ошибка в работе секвенсора. Проблема появилась в логике сборки блоков. Одна из транзакций не прошла проверку, как и должно было быть. Но после этого система не очистила журнал состояния и оставила в нём данные об аккаунтах [&#8230;]",
-    "published": "Tue, 30 Jun 2026 11:26:22 +0000"
-  },
-  "https://news.bitcoin.com/?p=827470": {
-    "attempts": 1,
-    "title": "Taiwan Unleashes Sweeping Crypto Law With 7-Year Prison Terms for Rule Breakers",
-    "link": "https://news.bitcoin.com/taiwan-unleashes-sweeping-crypto-law-with-7-year-prison-terms-for-rule-breakers/",
-    "description": "<img alt=\"Taiwan financial regulator.\" class=\"attachment-medium_large size-medium_large wp-post-image\" height=\"432\" src=\"https://static.news.bitcoin.com/wp-content/uploads/2026/06/taiwans-legislature-passes-56-article-crypto-law-768x432.jpg\" style=\"float: left; margin: 0 15px 15px 0;\" width=\"768\" />Taiwan passed the Virtual Asset Service Act, establishing its first dedicated crypto law, and designated the Financial Supervisory Commission as the sole regulator. Strict Licensing and Operational Requirements Taiwan’s Legislature on June 30 approved the Virtual Asset Service Act, establishing the island’s first dedicated cryptocurrency law and designating the Financial Supervisory Commission (FSC) as the [&#8230;]",
-    "published": "Tue, 30 Jun 2026 22:50:19 +0000"
-  },
-  "https://news.bitcoin.com/?p=827481": {
-    "attempts": 1,
-    "title": "Coinbase Institutional Head: ‘Over 40 Countries Commit to Buying Bitcoin’",
-    "link": "https://news.bitcoin.com/coinbase-institutional-head-over-40-countries-commit-to-buying-bitcoin/",
-    "description": "<img alt=\"Coinbase Head of Institutional Strategy John D&#039;Agostino.\" class=\"attachment-medium_large size-medium_large wp-post-image\" height=\"432\" src=\"https://static.news.bitcoin.com/wp-content/uploads/2026/06/coinbase-institutional-head-over-40-countries-commit-to-buying-bitcoin-768x432.png\" style=\"float: left; margin: 0 15px 15px 0;\" width=\"768\" />Coinbase Head of Institutional Strategy John D’Agostino told CNBC viewers this week that more than 40 countries have committed to bitcoin in some form for their national balance sheets. D’Agostino made the comments during a late June appearance widely clipped and shared on X on June 30. He described sovereign interest in bitcoin as a [&#8230;]",
-    "published": "Tue, 30 Jun 2026 22:10:23 +0000"
-  },
   "https://news.bitcoin.com/?p=827535": {
     "attempts": 1,
     "title": "Ark Invest Researcher Doubts Open USD Can Beat Circle After 16% Stock Drop",

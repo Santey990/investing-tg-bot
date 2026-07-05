@@ -1,28 +1,24 @@
-name: Investing-24 Bot
+name: Auto-Investing-Bot
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: "0 */4 * * *"   # каждые 2 часа
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
-permissions:
-  contents: write
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+  repository_dispatch:
+    types: [run-bot]
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
@@ -34,9 +30,13 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          BLOGGER_CLIENT_ID: ${{ secrets.BLOGGER_CLIENT_ID }}
+          BLOGGER_CLIENT_SECRET: ${{ secrets.BLOGGER_CLIENT_SECRET }}
+          BLOGGER_REFRESH_TOKEN: ${{ secrets.BLOGGER_REFRESH_TOKEN }}
+          BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
         run: python main.py
 
-      - name: Save posted state
+      - name: Commit and push posted guids
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"

@@ -14,18 +14,12 @@ from bs4 import BeautifulSoup
 from readability import Document
 
 # ==================== CONFIG ====================
-# Обновленный список из 10 проверенных источников (без HappyCoin)
+# Только рабочие источники (остальные 403/404 удалены)
 RSS_URLS = [
-    "https://forklog.com/feed/",                     # ForkLog
-    "https://coinspot.io/feed/",                     # Coinspot
-    "https://news.bitcoin.com/feed/",                # Bitcoin.com
-    "https://ru.beincrypto.com/feed/",               # BeInCrypto
-    "https://www.rbc.ru/crypto/rss/",                # РБК.Крипто
-    "https://bits.media/feed/",                      # Bits Media
-    "https://www.fxstreet.ru.com/cryptocurrencies/feed/", # FXStreet
-    "https://www.tokeninsight.com/ru/feed/",         # TokenInsight
-    "https://cryptonomist.ch/ru/feed/",              # Cryptonomist (замена HappyCoin)
-    "https://www.bloomberg.com/feed/quote-viewer/rss/", # Bloomberg (экономика)
+    "https://forklog.com/feed/",
+    "https://coinspot.io/feed/",
+    "https://news.bitcoin.com/feed/",
+    "https://ru.beincrypto.com/feed/",
 ]
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -95,6 +89,7 @@ def get_all_entries():
 
 # ==================== IMAGE ====================
 def extract_image(entry):
+    # Стандартные поля RSS
     try:
         if hasattr(entry, "enclosures"):
             for enc in entry.enclosures:
@@ -108,15 +103,8 @@ def extract_image(entry):
                 return media.get("url")
     except:
         pass
-    try:
-        page = requests.get(entry.link, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-        soup = BeautifulSoup(page.text, "html.parser")
-        og = soup.find("meta", property="og:image")
-        if og:
-            return og.get("content")
-    except:
-        pass
-    return None
+    # Fallback на og:image со страницы
+    return extract_image_from_url(entry.link)
 
 def extract_image_from_url(url):
     try:
@@ -131,15 +119,38 @@ def extract_image_from_url(url):
 
 # ==================== CLEAN ====================
 def clean_text(text):
+    """Удаляем строки, похожие на теги, даты, контакты, но оставляем осмысленный текст."""
     lines = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
-        if len(line) < 20:
+        # Удаляем строки с email или телефоном
+        if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', line):
             continue
-        if "ria.ru" in line.lower() or "прайм" in line.lower():
+        if re.search(r'(\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{2,4}[-.\s]?\d{2,4}', line):
             continue
+        # Удаляем явный мусор (агентства, даты, теги через запятую)
+        if re.search(r'ФГУП|МИА|Россия сегодня|internet-group|РИА|ПРАЙМ', line, re.IGNORECASE):
+            continue
+        if re.search(r'\d{1,2}\s+\w+|\d{4}', line) and re.search(r'МОСКВА|ПРАЙМ', line, re.IGNORECASE):
+            continue
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{4}', line):
+            continue
+        if re.fullmatch(r'\d{2}\.\d{2}\.\d{4}', line):
+            continue
+        if re.match(r'https?://\S+', line):
+            continue
+        # Удаляем строки, состоящие только из запятых и коротких слов (теги)
+        parts = [p.strip() for p in line.split(',') if p.strip()]
+        if len(parts) >= 2 and all(len(w) < 25 for w in parts):
+            if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают', 'ил', 'ел', 'ет', 'ит', 'ут', 'ют')) for w in parts):
+                continue
+        # Одиночные короткие слова (теги)
+        words = line.split()
+        if 1 <= len(words) <= 3 and all(len(w) < 20 for w in words):
+            if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают', 'ил', 'ел', 'ет', 'ит', 'ут', 'ют')) for w in words):
+                continue
         lines.append(line)
     return "\n".join(lines)
 
@@ -156,16 +167,15 @@ def extract_article_text(url, fallback=""):
             return text[:8000]
     except Exception as e:
         logger.warning(f"Article parse error: {e}")
-    return fallback[:8000]
+    return fallback[:8000] if fallback else ""
 
 # ==================== AI через OpenRouter ====================
+# Список только из стабильных бесплатных моделей
 OPENROUTER_MODELS = [
-    "openai/gpt-oss-120b:free",
-    "google/gemma-4-31b-it:free",
-    "z-ai/glm-4.5-air:free",
-    "moonshotai/kimi-k2.6:free",
     "nvidia/nemotron-3-nano-30b-a3b:free",
-    "openrouter/free"
+    "google/gemma-4-31b-it:free",
+    "mistralai/mistral-7b-instruct-v0.2:free",
+    "huggingfaceh4/zephyr-7b-beta:free",
 ]
 
 def ai_rewrite(text):
@@ -187,63 +197,38 @@ def ai_rewrite(text):
 {text}"""
 
     for model_name in OPENROUTER_MODELS:
-        for attempt in range(1, 3):
-            try:
-                response = requests.post(
-                    url="https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model_name,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 800,
-                        "temperature": 0.7,
-                    },
-                    timeout=60,
-                )
+        try:
+            response = requests.post(
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 800,
+                    "temperature": 0.7,
+                },
+                timeout=60,
+            )
 
-                if response.status_code == 200:
-                    data = response.json()
-                    try:
-                        content = data["choices"][0]["message"]["content"]
-                        if content and isinstance(content, str):
-                            content = content.strip()
-                            if content:
-                                logger.info(f"✅ Успешно использована модель: {model_name}")
-                                return content
-                            else:
-                                logger.warning(f"⚠️ Модель {model_name} вернула пустой текст (попытка {attempt})")
-                        else:
-                            logger.warning(f"⚠️ Модель {model_name} вернула нестроковое значение: {content} (попытка {attempt})")
-                    except (KeyError, IndexError, TypeError) as e:
-                        logger.warning(f"⚠️ Модель {model_name} вернула неожиданный формат: {e} (попытка {attempt})")
-                    
-                    if attempt == 1:
-                        time.sleep(3)
-                        continue
-                    else:
-                        break
-
-                elif response.status_code == 429:
-                    logger.warning(f"⏳ Модель {model_name} превысила лимит (429), пробуем следующую...")
-                    time.sleep(5)
-                    break
-                elif response.status_code == 404:
-                    logger.warning(f"❌ Модель {model_name} не найдена (404), пробуем следующую...")
-                    break
+            if response.status_code == 200:
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                if content and isinstance(content, str) and content.strip():
+                    logger.info(f"✅ Успешно использована модель: {model_name}")
+                    return content.strip()
                 else:
-                    logger.error(f"❌ Ошибка {response.status_code} для модели {model_name}: {response.text[:200]}")
-                    break
-
-            except Exception as e:
-                logger.error(f"❌ Исключение для модели {model_name} (попытка {attempt}): {e}")
-                if attempt == 1:
-                    time.sleep(3)
-                    continue
-                else:
-                    break
+                    logger.warning(f"⚠️ Модель {model_name} вернула пустой текст, ищем дальше...")
+            elif response.status_code == 429:
+                logger.warning(f"⏳ Модель {model_name} превысила лимит (429)")
+            elif response.status_code == 404:
+                logger.warning(f"❌ Модель {model_name} не найдена (404)")
+            else:
+                logger.error(f"❌ Ошибка {response.status_code} для модели {model_name}: {response.text[:200]}")
+        except Exception as e:
+            logger.error(f"❌ Исключение для модели {model_name}: {e}")
 
     logger.error("❌ Все модели из списка недоступны, используем fallback.")
     return None
@@ -276,11 +261,26 @@ def add_to_retry_queue(guid, entry_data):
         }
     save_retry_queue(queue)
 
+# ==================== EMOJI ====================
+def add_emoji_prefix(text):
+    """Добавляет эмодзи по тематике для fallback-постов."""
+    lower = text.lower()
+    if any(w in lower for w in ['акци', 'биржа', 'индекс', 'торг', 's&p', 'nasdaq', 'инвест']):
+        return "📈 " + text
+    if any(w in lower for w in ['крипт', 'биткоин', 'ethereum', 'блокчейн', 'токен']):
+        return "₿ " + text
+    if any(w in lower for w in ['нефть', 'газ', 'топлив', 'энерг']):
+        return "🛢️ " + text
+    if any(w in lower for w in ['банк', 'кредит', 'финанс', 'втб', 'сбер']):
+        return "🏦 " + text
+    if any(w in lower for w in ['доллар', 'валюта', 'рубл']):
+        return "💵 " + text
+    return "🔹 " + text
+
 # ==================== TELEGRAM ====================
 def send_photo_as_file(image_url, caption):
-    # Попытка скачать изображение с повторными попытками (если 502)
-    max_retries = 2
-    for attempt in range(max_retries):
+    """Отправляет фото как файл, чтобы обойти блокировки по URL."""
+    for attempt in range(2):
         try:
             response = requests.get(image_url, timeout=30, stream=True)
             response.raise_for_status()
@@ -302,12 +302,12 @@ def send_photo_as_file(image_url, caption):
             )
             result.raise_for_status()
             return True
-        except requests.exceptions.RequestException as e:
-            if attempt < max_retries - 1:
+        except Exception as e:
+            if attempt == 0:
                 logger.warning(f"Попытка {attempt+1} загрузки фото не удалась: {e}. Повтор через 2 сек.")
                 time.sleep(2)
             else:
-                logger.error(f"Ошибка при отправке фото как файла после {max_retries} попыток: {e}")
+                logger.error(f"Ошибка при отправке фото как файла после {2} попыток: {e}")
     return False
 
 def send_post(text, image_url=None):
@@ -369,7 +369,7 @@ def main():
                 logger.info(f"Отложенная новость опубликована с пересказом: {title}")
         else:
             if attempts >= MAX_RETRIES:
-                fallback_text = f"📈 {title}\n\n📢 Подписывайтесь: @Investing_24"
+                fallback_text = f"{add_emoji_prefix(title)}\n\n📢 Подписывайтесь: @Investing_24"
                 image = extract_image_from_url(link)
                 if send_post(fallback_text, image):
                     posted.add(guid)

@@ -9,6 +9,9 @@ import sys
 import feedparser
 import requests
 import cloudscraper
+import google.oauth2.credentials
+import google_auth_httplib2
+import googleapiclient.discovery
 
 from bs4 import BeautifulSoup
 from readability import Document
@@ -28,6 +31,12 @@ RSS_URLS = [
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+
+# Blogger API credentials
+BLOGGER_CLIENT_ID = os.environ.get("BLOGGER_CLIENT_ID")
+BLOGGER_CLIENT_SECRET = os.environ.get("BLOGGER_CLIENT_SECRET")
+BLOGGER_REFRESH_TOKEN = os.environ.get("BLOGGER_REFRESH_TOKEN")
+BLOGGER_BLOG_ID = os.environ.get("BLOGGER_BLOG_ID")
 
 DATA_FILE = "posted_guids.json"
 RETRY_FILE = "retry_queue.json"
@@ -182,17 +191,16 @@ def add_emoji_prefix(text):
 
 # ==================== AI через OpenRouter ====================
 OPENROUTER_MODELS = [
-    "google/gemma-4-31b-it:free",           # самая умная из бесплатных
+    "google/gemma-4-31b-it:free",
     "mistralai/mistral-7b-instruct-v0.2:free",
     "huggingfaceh4/zephyr-7b-beta:free",
-    "nvidia/nemotron-3-nano-30b-a3b:free",  # последний резерв
+    "nvidia/nemotron-3-nano-30b-a3b:free",
 ]
 
 def ai_rewrite(text):
     if not OPENROUTER_API_KEY:
         return None
 
-    # Чёткий промпт без лишних слов
     prompt = f"""Перепиши новость для телеграм-канала «Хайпожор».
 Стиль: кликбейтный, эмоциональный, с восклицаниями и интригой.
 Язык: только русский.
@@ -223,7 +231,6 @@ def ai_rewrite(text):
             if response.status_code == 200:
                 data = response.json()
                 content = data["choices"][0]["message"]["content"].strip()
-                # Защита: если ответ содержит английские фразы из промпта, отбрасываем
                 if any(phrase in content.lower() for phrase in [
                     "перепиши новость", "кликбейтный", "только русский",
                     "we need to rewrite", "rewrite the news", "must be in russian"
@@ -273,6 +280,37 @@ def add_to_retry_queue(guid, entry_data):
             "published": entry_data.get("published")
         }
     save_retry_queue(queue)
+
+# ==================== BLOGGER ====================
+def get_blogger_service():
+    """Создаёт авторизованный сервис Blogger API."""
+    if not all([BLOGGER_CLIENT_ID, BLOGGER_CLIENT_SECRET, BLOGGER_REFRESH_TOKEN]):
+        raise ValueError("Missing Blogger credentials")
+    creds = google.oauth2.credentials.Credentials(
+        None,
+        client_id=BLOGGER_CLIENT_ID,
+        client_secret=BLOGGER_CLIENT_SECRET,
+        refresh_token=BLOGGER_REFRESH_TOKEN,
+        token_uri="https://oauth2.googleapis.com/token",
+    )
+    return googleapiclient.discovery.build("blogger", "v3", credentials=creds)
+
+def post_to_blogger(title, content):
+    """Публикует запись в Blogger."""
+    if not BLOGGER_BLOG_ID:
+        logger.warning("BLOGGER_BLOG_ID не задан, пропускаем")
+        return
+    try:
+        service = get_blogger_service()
+        body = {
+            "title": title,
+            "content": content,
+            "labels": ["новости", "хайп", "жёлтая пресса"]
+        }
+        service.posts().insert(blogId=BLOGGER_BLOG_ID, body=body).execute()
+        logger.info("Запись в Blogger опубликована")
+    except Exception as e:
+        logger.error(f"Blogger error: {e}")
 
 # ==================== TELEGRAM ====================
 def send_photo_as_file(image_url, caption):
@@ -357,6 +395,7 @@ def main():
                 del retry_queue[guid]
                 total_published += 1
                 logger.info(f"Опубликовано (отложенное): {title}")
+                post_to_blogger(title, rewritten)
                 continue
         if attempts >= MAX_RETRIES:
             fallback = f"{add_emoji_prefix(title)}\n\n📢 Подписывайтесь: @Hype_Zhor"
@@ -366,6 +405,7 @@ def main():
                 del retry_queue[guid]
                 total_published += 1
                 logger.warning(f"Fallback для отложенной: {title}")
+                post_to_blogger(title, fallback)
         else:
             retry_queue[guid]["attempts"] = attempts + 1
         time.sleep(2)
@@ -395,6 +435,7 @@ def main():
                     newly_posted_guids.add(guid)
                     total_published += 1
                     logger.info(f"Опубликовано: {title}")
+                    post_to_blogger(title, rewritten)
                     continue
             add_to_retry_queue(guid, {
                 "title": title,

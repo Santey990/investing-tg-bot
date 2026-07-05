@@ -14,7 +14,6 @@ from bs4 import BeautifulSoup
 from readability import Document
 
 # ==================== CONFIG ====================
-# Только подтверждённо рабочие источники (без 403/404)
 RSS_URLS = [
     "https://life.ru/rss",
     "https://www.starhit.ru/rss/",
@@ -33,7 +32,7 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 DATA_FILE = "posted_guids.json"
 RETRY_FILE = "retry_queue.json"
 MAX_RETRIES = 3
-MAX_ITEMS_PER_RUN = 1
+MAX_ITEMS_PER_RUN = 1   # одна новость в час
 LOG_FILE = "bot.log"
 
 logging.basicConfig(
@@ -126,12 +125,10 @@ def clean_text(text):
         line = line.strip()
         if not line:
             continue
-        # Удаляем email/телефоны
         if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', line):
             continue
         if re.search(r'(\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{2,4}[-.\s]?\d{2,4}', line):
             continue
-        # Удаляем явный мусор (агентства, даты, теги)
         if re.search(r'ФГУП|МИА|Россия сегодня|internet-group|РИА|ПРАЙМ', line, re.IGNORECASE):
             continue
         if re.search(r'\d{1,2}\s+\w+|\d{4}', line) and re.search(r'МОСКВА|ПРАЙМ', line, re.IGNORECASE):
@@ -142,12 +139,10 @@ def clean_text(text):
             continue
         if re.match(r'https?://\S+', line):
             continue
-        # Теги через запятую
         parts = [p.strip() for p in line.split(',') if p.strip()]
         if len(parts) >= 2 and all(len(w) < 25 for w in parts):
             if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают', 'ил', 'ел', 'ет', 'ит', 'ут', 'ют')) for w in parts):
                 continue
-        # Одиночные короткие слова
         words = line.split()
         if 1 <= len(words) <= 3 and all(len(w) < 20 for w in words):
             if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают', 'ил', 'ел', 'ет', 'ит', 'ут', 'ют')) for w in words):
@@ -172,7 +167,6 @@ def extract_article_text(url, fallback=""):
 
 # ==================== EMOJI ====================
 def add_emoji_prefix(text):
-    """Эмодзи для жёлтой прессы и хайповых новостей."""
     lower = text.lower()
     if any(w in lower for w in ['скандал', 'сенсаци', 'развод', 'шоки', 'взрыв']):
         return "💥 " + text
@@ -188,34 +182,31 @@ def add_emoji_prefix(text):
 
 # ==================== AI через OpenRouter ====================
 OPENROUTER_MODELS = [
-    "nvidia/nemotron-3-nano-30b-a3b:free",
-    "google/gemma-4-31b-it:free",
+    "google/gemma-4-31b-it:free",           # самая умная из бесплатных
     "mistralai/mistral-7b-instruct-v0.2:free",
     "huggingfaceh4/zephyr-7b-beta:free",
+    "nvidia/nemotron-3-nano-30b-a3b:free",  # последний резерв
 ]
 
 def ai_rewrite(text):
     if not OPENROUTER_API_KEY:
-        logger.warning("OPENROUTER_API_KEY не задан, AI недоступен")
         return None
 
-    prompt = f"""Ты — редактор популярного Telegram‑канала «Хайпожор» с жёлтой прессой и хайповыми новостями. Полностью перепиши новость в кричащем, эмоциональном стиле.
+    # Чёткий промпт без лишних слов
+    prompt = f"""Перепиши новость для телеграм-канала «Хайпожор».
+Стиль: кликбейтный, эмоциональный, с восклицаниями и интригой.
+Язык: только русский.
+Формат: ТОЛЬКО готовый пост (до 800 символов), без предисловий.
+Включи минимум 3 эмодзи (😱, 🔥, 💔, ⚡ и т.д.).
+В конце обязательно: 📢 Подписывайтесь: @Hype_Zhor
 
-Требования:
-- Яркий, кликбейтный заголовок
-- Эмоциональные формулировки, восклицания, интрига
-- Сохрани только ключевые факты
-- Минимум 3 подходящих эмодзи (😱, 🔥, 💔, ⚡ и т.д.)
-- До 800 символов
-- В конце добавь: 📢 Подписывайтесь: @Hype_Zhor
-
-Текст новости:
+Новость:
 {text}"""
 
     for model_name in OPENROUTER_MODELS:
         try:
             response = requests.post(
-                url="https://openrouter.ai/api/v1/chat/completions",
+                "https://openrouter.ai/api/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                     "Content-Type": "application/json",
@@ -231,10 +222,17 @@ def ai_rewrite(text):
 
             if response.status_code == 200:
                 data = response.json()
-                content = data["choices"][0]["message"]["content"]
-                if content and isinstance(content, str) and content.strip():
+                content = data["choices"][0]["message"]["content"].strip()
+                # Защита: если ответ содержит английские фразы из промпта, отбрасываем
+                if any(phrase in content.lower() for phrase in [
+                    "перепиши новость", "кликбейтный", "только русский",
+                    "we need to rewrite", "rewrite the news", "must be in russian"
+                ]):
+                    logger.warning(f"Модель {model_name} вернула промпт вместо пересказа")
+                    continue
+                if content:
                     logger.info(f"✅ Успешно использована модель: {model_name}")
-                    return content.strip()
+                    return content
                 else:
                     logger.warning(f"⚠️ Модель {model_name} вернула пустой текст")
             elif response.status_code == 429:
@@ -246,7 +244,6 @@ def ai_rewrite(text):
         except Exception as e:
             logger.error(f"❌ Исключение для модели {model_name}: {e}")
 
-    logger.error("❌ Все модели недоступны, используем fallback.")
     return None
 
 # ==================== RETRY QUEUE ====================
@@ -306,15 +303,14 @@ def send_photo_as_file(image_url, caption):
                 logger.warning(f"Попытка {attempt+1} загрузки фото не удалась: {e}. Повтор через 2 сек.")
                 time.sleep(2)
             else:
-                logger.error(f"Ошибка при отправке фото как файла после 2 попыток: {e}")
+                logger.error(f"Ошибка при отправке фото после 2 попыток: {e}")
     return False
 
 def send_post(text, image_url=None):
     if image_url and isinstance(image_url, str) and image_url.startswith(('http://', 'https://')):
         if send_photo_as_file(image_url, text):
             return True
-        else:
-            logger.warning("Не удалось отправить фото, пробую только текст")
+        logger.warning("Не удалось отправить фото, пробую только текст")
     try:
         result = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -335,10 +331,9 @@ def main():
     newly_posted_guids = set()
     total_published = 0
 
-    # 1. Обработка отложенных новостей
-    retry_processed = 0
+    # 1. Отложенные новости
     for guid, data in list(retry_queue.items()):
-        if retry_processed >= MAX_ITEMS_PER_RUN:
+        if total_published >= MAX_ITEMS_PER_RUN:
             break
         if guid in posted:
             del retry_queue[guid]
@@ -349,50 +344,39 @@ def main():
         description = data.get("description", "")
         attempts = data.get("attempts", 1)
 
-        logger.info(f"Повторная попытка для отложенной новости: {title} (попытка {attempts}/{MAX_RETRIES})")
+        logger.info(f"Отложенная: {title} (попытка {attempts}/{MAX_RETRIES})")
 
         article = extract_article_text(link, description)
-        article = clean_text(article)
-        if not article:
-            article = title
+        article = clean_text(article) or title
 
         rewritten = ai_rewrite(article)
         if rewritten:
-            image = extract_image_from_url(link)
-            if send_post(rewritten, image):
+            if send_post(rewritten, extract_image_from_url(link)):
                 posted.add(guid)
                 newly_posted_guids.add(guid)
                 del retry_queue[guid]
-                retry_processed += 1
                 total_published += 1
-                logger.info(f"Отложенная новость опубликована с пересказом: {title}")
+                logger.info(f"Опубликовано (отложенное): {title}")
+                continue
+        if attempts >= MAX_RETRIES:
+            fallback = f"{add_emoji_prefix(title)}\n\n📢 Подписывайтесь: @Hype_Zhor"
+            if send_post(fallback, extract_image_from_url(link)):
+                posted.add(guid)
+                newly_posted_guids.add(guid)
+                del retry_queue[guid]
+                total_published += 1
+                logger.warning(f"Fallback для отложенной: {title}")
         else:
-            if attempts >= MAX_RETRIES:
-                fallback_text = f"{add_emoji_prefix(title)}\n\n📢 Подписывайтесь: @Hype_Zhor"
-                image = extract_image_from_url(link)
-                if send_post(fallback_text, image):
-                    posted.add(guid)
-                    newly_posted_guids.add(guid)
-                    del retry_queue[guid]
-                    retry_processed += 1
-                    total_published += 1
-                    logger.warning(f"Отложенная новость опубликована как fallback после {MAX_RETRIES} попыток: {title}")
-            else:
-                retry_queue[guid]["attempts"] = attempts + 1
-                logger.info(f"Новость остаётся в очереди, попытка {attempts+1}/{MAX_RETRIES}")
-
+            retry_queue[guid]["attempts"] = attempts + 1
         time.sleep(2)
 
     save_retry_queue(retry_queue)
 
-    # 2. Обработка свежих новостей из RSS
-    remaining_slots = MAX_ITEMS_PER_RUN - total_published
-    if remaining_slots > 0:
-        entries = get_all_entries()
-        new_posts = 0
-
-        for entry in entries:
-            if new_posts >= remaining_slots:
+    # 2. Свежие новости
+    remaining = MAX_ITEMS_PER_RUN - total_published
+    if remaining > 0:
+        for entry in get_all_entries():
+            if total_published >= MAX_ITEMS_PER_RUN:
                 break
             guid = make_guid(entry)
             if guid in posted:
@@ -401,40 +385,30 @@ def main():
             title = entry.get("title", "")
             logger.info(f"Новость: {title}")
 
-            description = entry.get("description", "")
-            article = extract_article_text(entry.link, description)
-            article = clean_text(article)
-            if not article:
-                article = title
+            article = extract_article_text(entry.link, entry.get("description", ""))
+            article = clean_text(article) or title
 
             rewritten = ai_rewrite(article)
             if rewritten:
-                image = extract_image(entry)
-                if send_post(rewritten, image):
+                if send_post(rewritten, extract_image(entry)):
                     posted.add(guid)
                     newly_posted_guids.add(guid)
-                    new_posts += 1
                     total_published += 1
                     logger.info(f"Опубликовано: {title}")
-            else:
-                add_to_retry_queue(guid, {
-                    "title": title,
-                    "link": entry.link,
-                    "description": description,
-                    "published": entry.get("published")
-                })
-                logger.info(f"Новость добавлена в очередь повторных попыток: {title}")
-
+                    continue
+            add_to_retry_queue(guid, {
+                "title": title,
+                "link": entry.link,
+                "description": entry.get("description", ""),
+                "published": entry.get("published")
+            })
             time.sleep(3)
 
-    # 3. Сохранение состояния
     if newly_posted_guids:
-        updated_guids = posted.union(newly_posted_guids)
-        save_posted_guids(updated_guids)
-        logger.info(f"Сохранено {len(newly_posted_guids)} новых GUID")
+        save_posted_guids(posted.union(newly_posted_guids))
+        logger.info(f"Сохранено {len(newly_posted_guids)} GUID")
 
-    queue_remaining = len(load_retry_queue())
-    logger.info(f"Готово. Добавлено {total_published} постов. В очереди осталось {queue_remaining}.")
+    logger.info(f"Готово. Постов: {total_published}. В очереди: {len(load_retry_queue())}")
 
 if __name__ == "__main__":
     main()

@@ -14,12 +14,16 @@ from bs4 import BeautifulSoup
 from readability import Document
 
 # ==================== CONFIG ====================
-# Только рабочие источники (остальные 403/404 удалены)
+# Только подтверждённо рабочие источники (без 403/404)
 RSS_URLS = [
-    "https://forklog.com/feed/",
-    "https://coinspot.io/feed/",
-    "https://news.bitcoin.com/feed/",
-    "https://ru.beincrypto.com/feed/",
+    "https://life.ru/rss",
+    "https://www.starhit.ru/rss/",
+    "https://www.eg.ru/rss/",
+    "https://dni.ru/rss/",
+    "https://www.kp.ru/rss/",
+    "https://www.mk.ru/rss/",
+    "https://www.thesun.co.uk/feed/",
+    "https://www.dailymail.co.uk/articles.rss",
 ]
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -89,7 +93,6 @@ def get_all_entries():
 
 # ==================== IMAGE ====================
 def extract_image(entry):
-    # Стандартные поля RSS
     try:
         if hasattr(entry, "enclosures"):
             for enc in entry.enclosures:
@@ -103,7 +106,6 @@ def extract_image(entry):
                 return media.get("url")
     except:
         pass
-    # Fallback на og:image со страницы
     return extract_image_from_url(entry.link)
 
 def extract_image_from_url(url):
@@ -119,18 +121,17 @@ def extract_image_from_url(url):
 
 # ==================== CLEAN ====================
 def clean_text(text):
-    """Удаляем строки, похожие на теги, даты, контакты, но оставляем осмысленный текст."""
     lines = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
-        # Удаляем строки с email или телефоном
+        # Удаляем email/телефоны
         if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', line):
             continue
         if re.search(r'(\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{2,4}[-.\s]?\d{2,4}', line):
             continue
-        # Удаляем явный мусор (агентства, даты, теги через запятую)
+        # Удаляем явный мусор (агентства, даты, теги)
         if re.search(r'ФГУП|МИА|Россия сегодня|internet-group|РИА|ПРАЙМ', line, re.IGNORECASE):
             continue
         if re.search(r'\d{1,2}\s+\w+|\d{4}', line) and re.search(r'МОСКВА|ПРАЙМ', line, re.IGNORECASE):
@@ -141,12 +142,12 @@ def clean_text(text):
             continue
         if re.match(r'https?://\S+', line):
             continue
-        # Удаляем строки, состоящие только из запятых и коротких слов (теги)
+        # Теги через запятую
         parts = [p.strip() for p in line.split(',') if p.strip()]
         if len(parts) >= 2 and all(len(w) < 25 for w in parts):
             if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают', 'ил', 'ел', 'ет', 'ит', 'ут', 'ют')) for w in parts):
                 continue
-        # Одиночные короткие слова (теги)
+        # Одиночные короткие слова
         words = line.split()
         if 1 <= len(words) <= 3 and all(len(w) < 20 for w in words):
             if not any(w.endswith(('ть', 'чь', 'лся', 'ется', 'ются', 'ете', 'ают', 'ил', 'ел', 'ет', 'ит', 'ут', 'ют')) for w in words):
@@ -169,8 +170,23 @@ def extract_article_text(url, fallback=""):
         logger.warning(f"Article parse error: {e}")
     return fallback[:8000] if fallback else ""
 
+# ==================== EMOJI ====================
+def add_emoji_prefix(text):
+    """Эмодзи для жёлтой прессы и хайповых новостей."""
+    lower = text.lower()
+    if any(w in lower for w in ['скандал', 'сенсаци', 'развод', 'шоки', 'взрыв']):
+        return "💥 " + text
+    if any(w in lower for w in ['звезд', 'певец', 'певица', 'актёр', 'актриса', 'шоу', 'селеб']):
+        return "🌟 " + text
+    if any(w in lower for w in ['смерть', 'трагеди', 'убийств', 'катастроф', 'криминал']):
+        return "💀 " + text
+    if any(w in lower for w in ['любовь', 'роман', 'свадьб', 'развод', 'измен']):
+        return "💔 " + text
+    if any(w in lower for w in ['деньг', 'миллион', 'миллиард', 'состояни', 'богат']):
+        return "💰 " + text
+    return "📢 " + text
+
 # ==================== AI через OpenRouter ====================
-# Список только из стабильных бесплатных моделей
 OPENROUTER_MODELS = [
     "nvidia/nemotron-3-nano-30b-a3b:free",
     "google/gemma-4-31b-it:free",
@@ -183,15 +199,15 @@ def ai_rewrite(text):
         logger.warning("OPENROUTER_API_KEY не задан, AI недоступен")
         return None
 
-    prompt = f"""Ты финансовый редактор Telegram-канала Investing-24. Полностью перепиши новость.
+    prompt = f"""Ты — редактор популярного Telegram‑канала «Хайпожор» с жёлтой прессой и хайповыми новостями. Полностью перепиши новость в кричащем, эмоциональном стиле.
 
 Требования:
-- Новый стиль изложения, не копируй оригинал
-- Сохрани факты и цифры
-- Добавь подходящие эмодзи
+- Яркий, кликбейтный заголовок
+- Эмоциональные формулировки, восклицания, интрига
+- Сохрани только ключевые факты
+- Минимум 3 подходящих эмодзи (😱, 🔥, 💔, ⚡ и т.д.)
 - До 800 символов
-- Без упоминания источника
-- В конце добавь: 📢 Подписывайтесь: @Investing_24
+- В конце добавь: 📢 Подписывайтесь: @Hype_Zhor
 
 Текст новости:
 {text}"""
@@ -208,7 +224,7 @@ def ai_rewrite(text):
                     "model": model_name,
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 800,
-                    "temperature": 0.7,
+                    "temperature": 0.8,
                 },
                 timeout=60,
             )
@@ -220,17 +236,17 @@ def ai_rewrite(text):
                     logger.info(f"✅ Успешно использована модель: {model_name}")
                     return content.strip()
                 else:
-                    logger.warning(f"⚠️ Модель {model_name} вернула пустой текст, ищем дальше...")
+                    logger.warning(f"⚠️ Модель {model_name} вернула пустой текст")
             elif response.status_code == 429:
                 logger.warning(f"⏳ Модель {model_name} превысила лимит (429)")
             elif response.status_code == 404:
                 logger.warning(f"❌ Модель {model_name} не найдена (404)")
             else:
-                logger.error(f"❌ Ошибка {response.status_code} для модели {model_name}: {response.text[:200]}")
+                logger.error(f"❌ Ошибка {response.status_code} для модели {model_name}")
         except Exception as e:
             logger.error(f"❌ Исключение для модели {model_name}: {e}")
 
-    logger.error("❌ Все модели из списка недоступны, используем fallback.")
+    logger.error("❌ Все модели недоступны, используем fallback.")
     return None
 
 # ==================== RETRY QUEUE ====================
@@ -261,25 +277,8 @@ def add_to_retry_queue(guid, entry_data):
         }
     save_retry_queue(queue)
 
-# ==================== EMOJI ====================
-def add_emoji_prefix(text):
-    """Добавляет эмодзи по тематике для fallback-постов."""
-    lower = text.lower()
-    if any(w in lower for w in ['акци', 'биржа', 'индекс', 'торг', 's&p', 'nasdaq', 'инвест']):
-        return "📈 " + text
-    if any(w in lower for w in ['крипт', 'биткоин', 'ethereum', 'блокчейн', 'токен']):
-        return "₿ " + text
-    if any(w in lower for w in ['нефть', 'газ', 'топлив', 'энерг']):
-        return "🛢️ " + text
-    if any(w in lower for w in ['банк', 'кредит', 'финанс', 'втб', 'сбер']):
-        return "🏦 " + text
-    if any(w in lower for w in ['доллар', 'валюта', 'рубл']):
-        return "💵 " + text
-    return "🔹 " + text
-
 # ==================== TELEGRAM ====================
 def send_photo_as_file(image_url, caption):
-    """Отправляет фото как файл, чтобы обойти блокировки по URL."""
     for attempt in range(2):
         try:
             response = requests.get(image_url, timeout=30, stream=True)
@@ -307,7 +306,7 @@ def send_photo_as_file(image_url, caption):
                 logger.warning(f"Попытка {attempt+1} загрузки фото не удалась: {e}. Повтор через 2 сек.")
                 time.sleep(2)
             else:
-                logger.error(f"Ошибка при отправке фото как файла после {2} попыток: {e}")
+                logger.error(f"Ошибка при отправке фото как файла после 2 попыток: {e}")
     return False
 
 def send_post(text, image_url=None):
@@ -369,7 +368,7 @@ def main():
                 logger.info(f"Отложенная новость опубликована с пересказом: {title}")
         else:
             if attempts >= MAX_RETRIES:
-                fallback_text = f"{add_emoji_prefix(title)}\n\n📢 Подписывайтесь: @Investing_24"
+                fallback_text = f"{add_emoji_prefix(title)}\n\n📢 Подписывайтесь: @Hype_Zhor"
                 image = extract_image_from_url(link)
                 if send_post(fallback_text, image):
                     posted.add(guid)

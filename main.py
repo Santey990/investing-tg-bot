@@ -9,9 +9,6 @@ import sys
 import feedparser
 import requests
 import cloudscraper
-import google.oauth2.credentials
-import google_auth_httplib2
-import googleapiclient.discovery
 
 from bs4 import BeautifulSoup
 from readability import Document
@@ -27,12 +24,6 @@ RSS_URLS = [
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-
-# Blogger API credentials (задайте через GitHub Secrets)
-BLOGGER_CLIENT_ID = os.environ.get("BLOGGER_CLIENT_ID")
-BLOGGER_CLIENT_SECRET = os.environ.get("BLOGGER_CLIENT_SECRET")
-BLOGGER_REFRESH_TOKEN = os.environ.get("BLOGGER_REFRESH_TOKEN")
-BLOGGER_BLOG_ID = os.environ.get("BLOGGER_BLOG_ID")
 
 DATA_FILE = "posted_guids.json"
 RETRY_FILE = "retry_queue.json"
@@ -189,7 +180,7 @@ def add_emoji_prefix(text):
 OPENROUTER_MODELS = [
     "google/gemma-4-31b-it:free",
     "nvidia/nemotron-3-nano-30b-a3b:free",
-    "mistralai/mistral-7b-instruct-v0.2:free",   # оставлены только реально доступные
+    "mistralai/mistral-7b-instruct-v0.2:free",
 ]
 
 def ai_rewrite(text):
@@ -276,35 +267,6 @@ def add_to_retry_queue(guid, entry_data):
         }
     save_retry_queue(queue)
 
-# ==================== BLOGGER ====================
-def get_blogger_service():
-    if not all([BLOGGER_CLIENT_ID, BLOGGER_CLIENT_SECRET, BLOGGER_REFRESH_TOKEN]):
-        raise ValueError("Missing Blogger credentials")
-    creds = google.oauth2.credentials.Credentials(
-        None,
-        client_id=BLOGGER_CLIENT_ID,
-        client_secret=BLOGGER_CLIENT_SECRET,
-        refresh_token=BLOGGER_REFRESH_TOKEN,
-        token_uri="https://oauth2.googleapis.com/token",
-    )
-    return googleapiclient.discovery.build("blogger", "v3", credentials=creds)
-
-def post_to_blogger(title, content):
-    if not BLOGGER_BLOG_ID:
-        logger.warning("BLOGGER_BLOG_ID не задан, пропускаем")
-        return
-    try:
-        service = get_blogger_service()
-        body = {
-            "title": title,
-            "content": content,
-            "labels": ["новости", "хайп", "жёлтая пресса"]
-        }
-        service.posts().insert(blogId=BLOGGER_BLOG_ID, body=body).execute()
-        logger.info("Запись в Blogger опубликована")
-    except Exception as e:
-        logger.error(f"Blogger error: {e}")
-
 # ==================== TELEGRAM ====================
 def send_photo_as_file(image_url, caption):
     for attempt in range(2):
@@ -388,7 +350,6 @@ def main():
                 del retry_queue[guid]
                 total_published += 1
                 logger.info(f"Опубликовано (отложенное): {title}")
-                post_to_blogger(title, rewritten)
                 continue
         if attempts >= MAX_RETRIES:
             fallback = f"{add_emoji_prefix(title)}\n\n📢 Подписывайтесь: @Hype_Zhor"
@@ -398,7 +359,6 @@ def main():
                 del retry_queue[guid]
                 total_published += 1
                 logger.warning(f"Fallback для отложенной: {title}")
-                post_to_blogger(title, fallback)
         else:
             retry_queue[guid]["attempts"] = attempts + 1
         time.sleep(2)
@@ -428,7 +388,6 @@ def main():
                     newly_posted_guids.add(guid)
                     total_published += 1
                     logger.info(f"Опубликовано: {title}")
-                    post_to_blogger(title, rewritten)
                     continue
             add_to_retry_queue(guid, {
                 "title": title,

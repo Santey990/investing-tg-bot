@@ -20,10 +20,6 @@ from readability import Document
 RSS_URLS = [
     "https://life.ru/rss",
     "https://www.starhit.ru/rss/",
-    "https://www.eg.ru/rss/",
-    "https://dni.ru/rss/",
-    "https://www.kp.ru/rss/",
-    "https://www.mk.ru/rss/",
     "https://www.thesun.co.uk/feed/",
     "https://www.dailymail.co.uk/articles.rss",
 ]
@@ -32,7 +28,7 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
-# Blogger API credentials
+# Blogger API credentials (задайте через GitHub Secrets)
 BLOGGER_CLIENT_ID = os.environ.get("BLOGGER_CLIENT_ID")
 BLOGGER_CLIENT_SECRET = os.environ.get("BLOGGER_CLIENT_SECRET")
 BLOGGER_REFRESH_TOKEN = os.environ.get("BLOGGER_REFRESH_TOKEN")
@@ -41,7 +37,7 @@ BLOGGER_BLOG_ID = os.environ.get("BLOGGER_BLOG_ID")
 DATA_FILE = "posted_guids.json"
 RETRY_FILE = "retry_queue.json"
 MAX_RETRIES = 3
-MAX_ITEMS_PER_RUN = 1   # одна новость в час
+MAX_ITEMS_PER_RUN = 1
 LOG_FILE = "bot.log"
 
 logging.basicConfig(
@@ -192,9 +188,8 @@ def add_emoji_prefix(text):
 # ==================== AI через OpenRouter ====================
 OPENROUTER_MODELS = [
     "google/gemma-4-31b-it:free",
-    "mistralai/mistral-7b-instruct-v0.2:free",
-    "huggingfaceh4/zephyr-7b-beta:free",
     "nvidia/nemotron-3-nano-30b-a3b:free",
+    "mistralai/mistral-7b-instruct-v0.2:free",   # оставлены только реально доступные
 ]
 
 def ai_rewrite(text):
@@ -283,7 +278,6 @@ def add_to_retry_queue(guid, entry_data):
 
 # ==================== BLOGGER ====================
 def get_blogger_service():
-    """Создаёт авторизованный сервис Blogger API."""
     if not all([BLOGGER_CLIENT_ID, BLOGGER_CLIENT_SECRET, BLOGGER_REFRESH_TOKEN]):
         raise ValueError("Missing Blogger credentials")
     creds = google.oauth2.credentials.Credentials(
@@ -296,7 +290,6 @@ def get_blogger_service():
     return googleapiclient.discovery.build("blogger", "v3", credentials=creds)
 
 def post_to_blogger(title, content):
-    """Публикует запись в Blogger."""
     if not BLOGGER_BLOG_ID:
         logger.warning("BLOGGER_BLOG_ID не задан, пропускаем")
         return

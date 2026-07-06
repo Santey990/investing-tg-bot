@@ -36,6 +36,6 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add posted_guids.json retry_queue.json || true
+          git add posted_guids.json || true
           git commit -m "update posted guids" || exit 0
           git push

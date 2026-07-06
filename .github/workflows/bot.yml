@@ -39,4 +39,5 @@ jobs:
           git config user.email "github-actions@github.com"
           git add posted_guids.json || true
           git commit -m "update posted guids" || exit 0
+          git pull --rebase -X ours origin main || echo "Rebase failed, but continuing"
           git push

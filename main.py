@@ -191,6 +191,20 @@ OPENROUTER_MODELS = [
     "openrouter/free",
 ]
 
+def truncate_to_last_sentence(text, max_len=900):
+    """Обрезает текст до последнего законченного предложения в пределах max_len."""
+    if len(text) <= max_len:
+        return text
+    cut = text[:max_len]
+    # Ищем последний знак конца предложения (.!?)
+    for sep in ['.', '!', '?']:
+        pos = cut.rfind(sep)
+        if pos > 400:  # если нашли достаточно далеко
+            return cut[:pos+1]
+    # Если не нашли, обрезаем по последнему пробелу
+    last_space = cut.rfind(' ')
+    return cut[:last_space] + "…" if last_space > 0 else cut + "…"
+
 def log_rate_limit(response, key_idx):
     """Выводит в лог остаток запросов для ключа."""
     remaining = response.headers.get("X-RateLimit-Remaining")
@@ -211,6 +225,7 @@ def ai_rewrite(text):
 Формат: ТОЛЬКО готовый пост (до 800 символов), без предисловий.
 Включи минимум 3 эмодзи (😱, 🔥, 💔, ⚡ и т.д.).
 В конце обязательно: 📢 Подписывайтесь: @Hype_Zhor
+Завершай текст полностью, не обрывай на полуслове.
 
 Новость:
 {text}"""
@@ -229,25 +244,29 @@ def ai_rewrite(text):
                     json={
                         "model": model_name,
                         "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 800,
+                        "max_tokens": 1000,   # увеличен, чтобы хватало на полный пост
                         "temperature": 0.8,
                     },
                     timeout=60,
                 )
 
-                # Всегда логируем остаток запросов
                 log_rate_limit(response, key_idx)
 
                 if response.status_code == 200:
                     data = response.json()
                     content = data["choices"][0]["message"]["content"].strip()
+
+                    # Защита от возврата промпта
                     if any(phrase in content.lower() for phrase in [
                         "перепиши новость", "кликбейтный", "только русский",
                         "we need to rewrite", "rewrite the news", "must be in russian"
                     ]):
                         logger.warning(f"Модель {model_name} вернула промпт вместо пересказа")
                         continue
+
                     if content:
+                        # Обрезаем до последнего законченного предложения
+                        content = truncate_to_last_sentence(content)
                         logger.info(f"✅ Успешно использована модель: {model_name} (ключ {key_idx})")
                         return content
                     else:

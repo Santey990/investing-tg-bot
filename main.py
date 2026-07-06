@@ -175,10 +175,18 @@ def add_emoji_prefix(text):
     return "🔥 " + text
 
 # ==================== AI через OpenRouter ====================
+# Расширенный список бесплатных моделей (чем больше, тем выше шанс)
 OPENROUTER_MODELS = [
     "google/gemma-4-31b-it:free",
-    "nvidia/nemotron-3-nano-30b-a3b:free",
+    "google/gemma-2-9b-it:free",
     "mistralai/mistral-7b-instruct-v0.2:free",
+    "huggingfaceh4/zephyr-7b-beta:free",
+    "nvidia/nemotron-3-nano-30b-a3b:free",
+    "phi-3-mini-128k-instruct:free",
+    "meta-llama/llama-3.2-3b-instruct:free",
+    "qwen/qwen-2.5-7b-instruct:free",
+    "microsoft/phi-3-mini-4k-instruct:free",
+    "openrouter/free",
 ]
 
 def ai_rewrite(text):

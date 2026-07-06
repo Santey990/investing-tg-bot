@@ -23,7 +23,13 @@ RSS_URLS = [
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+
+# Собираем все ключи OpenRouter
+OPENROUTER_KEYS = []
+for key_name in ["OPENROUTER_API_KEY", "OPENROUTER_API_KEY_2"]:
+    key = os.environ.get(key_name)
+    if key:
+        OPENROUTER_KEYS.append(key)
 
 DATA_FILE = "posted_guids.json"
 MAX_ITEMS_PER_RUN = 1
@@ -175,7 +181,6 @@ def add_emoji_prefix(text):
     return "🔥 " + text
 
 # ==================== AI через OpenRouter ====================
-# Расширенный список бесплатных моделей (чем больше, тем выше шанс)
 OPENROUTER_MODELS = [
     "google/gemma-4-31b-it:free",
     "google/gemma-2-9b-it:free",
@@ -190,7 +195,8 @@ OPENROUTER_MODELS = [
 ]
 
 def ai_rewrite(text):
-    if not OPENROUTER_API_KEY:
+    if not OPENROUTER_KEYS:
+        logger.warning("Нет ни одного ключа OpenRouter")
         return None
 
     prompt = f"""Перепиши новость для телеграм-канала «Хайпожор».
@@ -203,46 +209,52 @@ def ai_rewrite(text):
 Новость:
 {text}"""
 
-    for model_name in OPENROUTER_MODELS:
-        try:
-            response = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model_name,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 800,
-                    "temperature": 0.8,
-                },
-                timeout=60,
-            )
+    # Перебираем ключи
+    for key_idx, api_key in enumerate(OPENROUTER_KEYS, 1):
+        logger.info(f"🔑 Пробую ключ {key_idx}/{len(OPENROUTER_KEYS)}")
 
-            if response.status_code == 200:
-                data = response.json()
-                content = data["choices"][0]["message"]["content"].strip()
-                if any(phrase in content.lower() for phrase in [
-                    "перепиши новость", "кликбейтный", "только русский",
-                    "we need to rewrite", "rewrite the news", "must be in russian"
-                ]):
-                    logger.warning(f"Модель {model_name} вернула промпт вместо пересказа")
-                    continue
-                if content:
-                    logger.info(f"✅ Успешно использована модель: {model_name}")
-                    return content
+        # Перебираем модели на текущем ключе
+        for model_name in OPENROUTER_MODELS:
+            try:
+                response = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model_name,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 800,
+                        "temperature": 0.8,
+                    },
+                    timeout=60,
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    content = data["choices"][0]["message"]["content"].strip()
+                    if any(phrase in content.lower() for phrase in [
+                        "перепиши новость", "кликбейтный", "только русский",
+                        "we need to rewrite", "rewrite the news", "must be in russian"
+                    ]):
+                        logger.warning(f"Модель {model_name} вернула промпт вместо пересказа")
+                        continue
+                    if content:
+                        logger.info(f"✅ Успешно использована модель: {model_name} (ключ {key_idx})")
+                        return content
+                    else:
+                        logger.warning(f"⚠️ Модель {model_name} вернула пустой текст")
+                elif response.status_code == 429:
+                    logger.warning(f"⏳ Модель {model_name} превысила лимит (429) на ключе {key_idx}")
+                elif response.status_code == 404:
+                    logger.warning(f"❌ Модель {model_name} не найдена (404)")
                 else:
-                    logger.warning(f"⚠️ Модель {model_name} вернула пустой текст")
-            elif response.status_code == 429:
-                logger.warning(f"⏳ Модель {model_name} превысила лимит (429)")
-            elif response.status_code == 404:
-                logger.warning(f"❌ Модель {model_name} не найдена (404)")
-            else:
-                logger.error(f"❌ Ошибка {response.status_code} для модели {model_name}")
-        except Exception as e:
-            logger.error(f"❌ Исключение для модели {model_name}: {e}")
+                    logger.error(f"❌ Ошибка {response.status_code} для модели {model_name}")
+            except Exception as e:
+                logger.error(f"❌ Исключение для модели {model_name}: {e}")
 
+    logger.error("❌ Все ключи и модели исчерпаны.")
     return None
 
 # ==================== TELEGRAM ====================
@@ -323,7 +335,7 @@ def main():
                 logger.info(f"Опубликовано: {title}")
                 continue
 
-        # Fallback: публикуем сразу, не откладывая
+        # Fallback
         body_text = article if article and article != title else ""
         if body_text:
             body_text = clean_text(body_text)

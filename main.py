@@ -26,8 +26,6 @@ CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 DATA_FILE = "posted_guids.json"
-RETRY_FILE = "retry_queue.json"
-MAX_RETRIES = 3
 MAX_ITEMS_PER_RUN = 1
 LOG_FILE = "bot.log"
 
@@ -239,34 +237,6 @@ def ai_rewrite(text):
 
     return None
 
-# ==================== RETRY QUEUE ====================
-def load_retry_queue():
-    if not os.path.exists(RETRY_FILE):
-        return {}
-    try:
-        with open(RETRY_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def save_retry_queue(queue):
-    with open(RETRY_FILE, "w", encoding="utf-8") as f:
-        json.dump(queue, f, ensure_ascii=False, indent=2)
-
-def add_to_retry_queue(guid, entry_data):
-    queue = load_retry_queue()
-    if guid in queue:
-        queue[guid]["attempts"] += 1
-    else:
-        queue[guid] = {
-            "attempts": 1,
-            "title": entry_data.get("title"),
-            "link": entry_data.get("link"),
-            "description": entry_data.get("description", ""),
-            "published": entry_data.get("published")
-        }
-    save_retry_queue(queue)
-
 # ==================== TELEGRAM ====================
 def send_photo_as_file(image_url, caption):
     for attempt in range(2):
@@ -320,99 +290,55 @@ def send_post(text, image_url=None):
 def main():
     logger.info("=== START ===")
     posted = load_posted_guids()
-    retry_queue = load_retry_queue()
     newly_posted_guids = set()
     total_published = 0
 
-    # 1. Отложенные новости
-    for guid, data in list(retry_queue.items()):
+    for entry in get_all_entries():
         if total_published >= MAX_ITEMS_PER_RUN:
             break
+        guid = make_guid(entry)
         if guid in posted:
-            del retry_queue[guid]
             continue
 
-        title = data.get("title", "")
-        link = data.get("link", "")
-        description = data.get("description", "")
-        attempts = data.get("attempts", 1)
+        title = entry.get("title", "")
+        logger.info(f"Новость: {title}")
 
-        logger.info(f"Отложенная: {title} (попытка {attempts}/{MAX_RETRIES})")
-
-        article = extract_article_text(link, description)
+        article = extract_article_text(entry.link, entry.get("description", ""))
         article = clean_text(article) or title
 
         rewritten = ai_rewrite(article)
         if rewritten:
-            if send_post(rewritten, extract_image_from_url(link)):
+            if send_post(rewritten, extract_image(entry)):
                 posted.add(guid)
                 newly_posted_guids.add(guid)
-                del retry_queue[guid]
                 total_published += 1
-                logger.info(f"Опубликовано (отложенное): {title}")
+                logger.info(f"Опубликовано: {title}")
                 continue
 
-        if attempts >= MAX_RETRIES:
-            body_text = article if article and article != title else ""
-            if body_text:
-                body_text = clean_text(body_text)
-                if len(body_text) > 500:
-                    cut = body_text[:500]
-                    last_period = max(cut.rfind('.'), cut.rfind('!'), cut.rfind('?'))
-                    body_text = cut[:last_period+1] if last_period > 200 else cut + "…"
-                fallback = f"{add_emoji_prefix('🔥 ' + title)}\n\n{body_text}\n\n📢 Подписывайтесь: @Hype_Zhor"
-            else:
-                fallback = f"{add_emoji_prefix('🔥 ' + title)}\n\n📢 Подписывайтесь: @Hype_Zhor"
-            if send_post(fallback, extract_image_from_url(link)):
-                posted.add(guid)
-                newly_posted_guids.add(guid)
-                del retry_queue[guid]
-                total_published += 1
-                logger.warning(f"Fallback для отложенной: {title}")
+        # Fallback: публикуем сразу, не откладывая
+        body_text = article if article and article != title else ""
+        if body_text:
+            body_text = clean_text(body_text)
+            if len(body_text) > 500:
+                cut = body_text[:500]
+                last_period = max(cut.rfind('.'), cut.rfind('!'), cut.rfind('?'))
+                body_text = cut[:last_period+1] if last_period > 200 else cut + "…"
+            fallback = f"{add_emoji_prefix('🔥 ' + title)}\n\n{body_text}\n\n📢 Подписывайтесь: @Hype_Zhor"
         else:
-            retry_queue[guid]["attempts"] = attempts + 1
-        time.sleep(2)
+            fallback = f"{add_emoji_prefix('🔥 ' + title)}\n\n📢 Подписывайтесь: @Hype_Zhor"
+        if send_post(fallback, extract_image(entry)):
+            posted.add(guid)
+            newly_posted_guids.add(guid)
+            total_published += 1
+            logger.warning(f"Fallback: {title}")
 
-    save_retry_queue(retry_queue)
-
-    # 2. Свежие новости
-    remaining = MAX_ITEMS_PER_RUN - total_published
-    if remaining > 0:
-        for entry in get_all_entries():
-            if total_published >= MAX_ITEMS_PER_RUN:
-                break
-            guid = make_guid(entry)
-            if guid in posted:
-                continue
-
-            title = entry.get("title", "")
-            logger.info(f"Новость: {title}")
-
-            article = extract_article_text(entry.link, entry.get("description", ""))
-            article = clean_text(article) or title
-
-            rewritten = ai_rewrite(article)
-            if rewritten:
-                if send_post(rewritten, extract_image(entry)):
-                    posted.add(guid)
-                    newly_posted_guids.add(guid)
-                    total_published += 1
-                    logger.info(f"Опубликовано: {title}")
-                    continue
-
-            add_to_retry_queue(guid, {
-                "title": title,
-                "link": entry.link,
-                "description": entry.get("description", ""),
-                "published": entry.get("published")
-            })
-            time.sleep(3)
+        time.sleep(3)
 
     if newly_posted_guids:
         save_posted_guids(posted.union(newly_posted_guids))
         logger.info(f"Сохранено {len(newly_posted_guids)} GUID")
 
-    logger.info(f"Готово. Постов: {total_published}. В очереди: {len(load_retry_queue())}")
+    logger.info(f"Готово. Постов: {total_published}.")
 
 if __name__ == "__main__":
     main()

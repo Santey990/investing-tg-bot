@@ -174,7 +174,7 @@ def add_emoji_prefix(text):
         return "💔 " + text
     if any(w in lower for w in ['деньг', 'миллион', 'миллиард', 'состояни', 'богат']):
         return "💰 " + text
-    return "📢 " + text
+    return "🔥 " + text
 
 # ==================== AI через OpenRouter ====================
 OPENROUTER_MODELS = [
@@ -351,8 +351,18 @@ def main():
                 total_published += 1
                 logger.info(f"Опубликовано (отложенное): {title}")
                 continue
+
         if attempts >= MAX_RETRIES:
-            fallback = f"{add_emoji_prefix(title)}\n\n📢 Подписывайтесь: @Hype_Zhor"
+            body_text = article if article and article != title else ""
+            if body_text:
+                body_text = clean_text(body_text)
+                if len(body_text) > 500:
+                    cut = body_text[:500]
+                    last_period = max(cut.rfind('.'), cut.rfind('!'), cut.rfind('?'))
+                    body_text = cut[:last_period+1] if last_period > 200 else cut + "…"
+                fallback = f"{add_emoji_prefix('🔥 ' + title)}\n\n{body_text}\n\n📢 Подписывайтесь: @Hype_Zhor"
+            else:
+                fallback = f"{add_emoji_prefix('🔥 ' + title)}\n\n📢 Подписывайтесь: @Hype_Zhor"
             if send_post(fallback, extract_image_from_url(link)):
                 posted.add(guid)
                 newly_posted_guids.add(guid)
@@ -389,6 +399,7 @@ def main():
                     total_published += 1
                     logger.info(f"Опубликовано: {title}")
                     continue
+
             add_to_retry_queue(guid, {
                 "title": title,
                 "link": entry.link,

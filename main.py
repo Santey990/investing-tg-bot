@@ -13,7 +13,7 @@ import cloudscraper
 from bs4 import BeautifulSoup
 from readability import Document
 
-# ==================== CONFIG (временная) ====================
+# ==================== CONFIG ====================
 RSS_URLS = [
     "https://life.ru/rss",
     "https://www.starhit.ru/rss/",
@@ -24,6 +24,7 @@ RSS_URLS = [
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 
+# Собираем все ключи OpenRouter
 OPENROUTER_KEYS = []
 for key_name in ["OPENROUTER_API_KEY", "OPENROUTER_API_KEY_2"]:
     key = os.environ.get(key_name)
@@ -31,7 +32,7 @@ for key_name in ["OPENROUTER_API_KEY", "OPENROUTER_API_KEY_2"]:
         OPENROUTER_KEYS.append(key)
 
 DATA_FILE = "posted_guids.json"
-MAX_ITEMS_PER_RUN = 50          # 👈 публикуем до 50 новостей за раз
+MAX_ITEMS_PER_RUN = 1
 LOG_FILE = "bot.log"
 
 logging.basicConfig(
@@ -191,17 +192,21 @@ OPENROUTER_MODELS = [
 ]
 
 def truncate_to_last_sentence(text, max_len=900):
+    """Обрезает текст до последнего законченного предложения в пределах max_len."""
     if len(text) <= max_len:
         return text
     cut = text[:max_len]
+    # Ищем последний знак конца предложения (.!?)
     for sep in ['.', '!', '?']:
         pos = cut.rfind(sep)
-        if pos > 400:
+        if pos > 400:  # если нашли достаточно далеко
             return cut[:pos+1]
+    # Если не нашли, обрезаем по последнему пробелу
     last_space = cut.rfind(' ')
     return cut[:last_space] + "…" if last_space > 0 else cut + "…"
 
 def log_rate_limit(response, key_idx):
+    """Выводит в лог остаток запросов для ключа."""
     remaining = response.headers.get("X-RateLimit-Remaining")
     limit = response.headers.get("X-RateLimit-Limit")
     if remaining is not None and limit is not None:
@@ -211,6 +216,7 @@ def log_rate_limit(response, key_idx):
 
 def ai_rewrite(text):
     if not OPENROUTER_KEYS:
+        logger.warning("Нет ни одного ключа OpenRouter")
         return None
 
     prompt = f"""Перепиши новость для телеграм-канала «Хайпожор».
@@ -225,6 +231,8 @@ def ai_rewrite(text):
 {text}"""
 
     for key_idx, api_key in enumerate(OPENROUTER_KEYS, 1):
+        logger.info(f"🔑 Пробую ключ {key_idx}/{len(OPENROUTER_KEYS)}")
+
         for model_name in OPENROUTER_MODELS:
             try:
                 response = requests.post(
@@ -236,29 +244,43 @@ def ai_rewrite(text):
                     json={
                         "model": model_name,
                         "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 1000,
+                        "max_tokens": 1000,   # увеличен, чтобы хватало на полный пост
                         "temperature": 0.8,
                     },
                     timeout=60,
                 )
+
                 log_rate_limit(response, key_idx)
 
                 if response.status_code == 200:
                     data = response.json()
                     content = data["choices"][0]["message"]["content"].strip()
+
+                    # Защита от возврата промпта
                     if any(phrase in content.lower() for phrase in [
                         "перепиши новость", "кликбейтный", "только русский",
                         "we need to rewrite", "rewrite the news", "must be in russian"
                     ]):
+                        logger.warning(f"Модель {model_name} вернула промпт вместо пересказа")
                         continue
+
                     if content:
-                        return truncate_to_last_sentence(content)
+                        # Обрезаем до последнего законченного предложения
+                        content = truncate_to_last_sentence(content)
+                        logger.info(f"✅ Успешно использована модель: {model_name} (ключ {key_idx})")
+                        return content
+                    else:
+                        logger.warning(f"⚠️ Модель {model_name} вернула пустой текст")
                 elif response.status_code == 429:
-                    logger.warning(f"⏳ {model_name} лимит")
+                    logger.warning(f"⏳ Модель {model_name} превысила лимит (429) на ключе {key_idx}")
                 elif response.status_code == 404:
-                    logger.warning(f"❌ {model_name} 404")
+                    logger.warning(f"❌ Модель {model_name} не найдена (404)")
+                else:
+                    logger.error(f"❌ Ошибка {response.status_code} для модели {model_name}")
             except Exception as e:
-                logger.error(f"Исключение {model_name}: {e}")
+                logger.error(f"❌ Исключение для модели {model_name}: {e}")
+
+    logger.error("❌ Все ключи и модели исчерпаны.")
     return None
 
 # ==================== TELEGRAM ====================
@@ -287,12 +309,17 @@ def send_photo_as_file(image_url, caption):
             return True
         except Exception as e:
             if attempt == 0:
+                logger.warning(f"Попытка {attempt+1} загрузки фото не удалась: {e}. Повтор через 2 сек.")
                 time.sleep(2)
+            else:
+                logger.error(f"Ошибка при отправке фото после 2 попыток: {e}")
     return False
 
 def send_post(text, image_url=None):
-    if image_url and send_photo_as_file(image_url, text):
-        return True
+    if image_url and isinstance(image_url, str) and image_url.startswith(('http://', 'https://')):
+        if send_photo_as_file(image_url, text):
+            return True
+        logger.warning("Не удалось отправить фото, пробую только текст")
     try:
         result = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -302,42 +329,62 @@ def send_post(text, image_url=None):
         result.raise_for_status()
         return True
     except Exception as e:
-        logger.error(f"Ошибка отправки: {e}")
+        logger.error(f"Не удалось отправить даже текст: {e}")
         return False
 
 # ==================== MAIN ====================
 def main():
     logger.info("=== START ===")
     posted = load_posted_guids()
-    total = 0
+    newly_posted_guids = set()
+    total_published = 0
 
     for entry in get_all_entries():
-        if total >= MAX_ITEMS_PER_RUN:
+        if total_published >= MAX_ITEMS_PER_RUN:
             break
         guid = make_guid(entry)
         if guid in posted:
             continue
 
         title = entry.get("title", "")
+        logger.info(f"Новость: {title}")
+
         article = extract_article_text(entry.link, entry.get("description", ""))
         article = clean_text(article) or title
+
         rewritten = ai_rewrite(article)
-
         if rewritten:
-            success = send_post(rewritten, extract_image(entry))
+            if send_post(rewritten, extract_image(entry)):
+                posted.add(guid)
+                newly_posted_guids.add(guid)
+                total_published += 1
+                logger.info(f"Опубликовано: {title}")
+                continue
+
+        # Fallback
+        body_text = article if article and article != title else ""
+        if body_text:
+            body_text = clean_text(body_text)
+            if len(body_text) > 500:
+                cut = body_text[:500]
+                last_period = max(cut.rfind('.'), cut.rfind('!'), cut.rfind('?'))
+                body_text = cut[:last_period+1] if last_period > 200 else cut + "…"
+            fallback = f"{add_emoji_prefix('🔥 ' + title)}\n\n{body_text}\n\n📢 Подписывайтесь: @Hype_Zhor"
         else:
-            body = article[:500] if article else title
-            fallback = f"{add_emoji_prefix('🔥 ' + title)}\n\n{body}\n\n📢 @Hype_Zhor"
-            success = send_post(fallback, extract_image(entry))
-
-        if success:
+            fallback = f"{add_emoji_prefix('🔥 ' + title)}\n\n📢 Подписывайтесь: @Hype_Zhor"
+        if send_post(fallback, extract_image(entry)):
             posted.add(guid)
-            total += 1
-            logger.info(f"✅ {title}")
-            save_posted_guids(posted)   # сохраняем после каждого поста
-        time.sleep(1.2)                 # ~50 постов/мин, Telegram не банит
+            newly_posted_guids.add(guid)
+            total_published += 1
+            logger.warning(f"Fallback: {title}")
 
-    logger.info(f"Готово. Постов: {total}")
+        time.sleep(3)
+
+    if newly_posted_guids:
+        save_posted_guids(posted.union(newly_posted_guids))
+        logger.info(f"Сохранено {len(newly_posted_guids)} GUID")
+
+    logger.info(f"Готово. Постов: {total_published}.")
 
 if __name__ == "__main__":
     main()

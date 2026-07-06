@@ -187,12 +187,18 @@ OPENROUTER_MODELS = [
     "mistralai/mistral-7b-instruct-v0.2:free",
     "huggingfaceh4/zephyr-7b-beta:free",
     "nvidia/nemotron-3-nano-30b-a3b:free",
-    "phi-3-mini-128k-instruct:free",
     "meta-llama/llama-3.2-3b-instruct:free",
-    "qwen/qwen-2.5-7b-instruct:free",
-    "microsoft/phi-3-mini-4k-instruct:free",
     "openrouter/free",
 ]
+
+def log_rate_limit(response, key_idx):
+    """Выводит в лог остаток запросов для ключа."""
+    remaining = response.headers.get("X-RateLimit-Remaining")
+    limit = response.headers.get("X-RateLimit-Limit")
+    if remaining is not None and limit is not None:
+        logger.info(f"🔑 Ключ {key_idx}: осталось {remaining}/{limit} запросов")
+    else:
+        logger.info(f"🔑 Ключ {key_idx}: заголовки лимита не получены")
 
 def ai_rewrite(text):
     if not OPENROUTER_KEYS:
@@ -209,11 +215,9 @@ def ai_rewrite(text):
 Новость:
 {text}"""
 
-    # Перебираем ключи
     for key_idx, api_key in enumerate(OPENROUTER_KEYS, 1):
         logger.info(f"🔑 Пробую ключ {key_idx}/{len(OPENROUTER_KEYS)}")
 
-        # Перебираем модели на текущем ключе
         for model_name in OPENROUTER_MODELS:
             try:
                 response = requests.post(
@@ -230,6 +234,9 @@ def ai_rewrite(text):
                     },
                     timeout=60,
                 )
+
+                # Всегда логируем остаток запросов
+                log_rate_limit(response, key_idx)
 
                 if response.status_code == 200:
                     data = response.json()

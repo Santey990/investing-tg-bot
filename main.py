@@ -192,21 +192,17 @@ OPENROUTER_MODELS = [
 ]
 
 def truncate_to_last_sentence(text, max_len=900):
-    """Обрезает текст до последнего законченного предложения в пределах max_len."""
     if len(text) <= max_len:
         return text
     cut = text[:max_len]
-    # Ищем последний знак конца предложения (.!?)
     for sep in ['.', '!', '?']:
         pos = cut.rfind(sep)
-        if pos > 400:  # если нашли достаточно далеко
+        if pos > 400:
             return cut[:pos+1]
-    # Если не нашли, обрезаем по последнему пробелу
     last_space = cut.rfind(' ')
     return cut[:last_space] + "…" if last_space > 0 else cut + "…"
 
 def log_rate_limit(response, key_idx):
-    """Выводит в лог остаток запросов для ключа."""
     remaining = response.headers.get("X-RateLimit-Remaining")
     limit = response.headers.get("X-RateLimit-Limit")
     if remaining is not None and limit is not None:
@@ -244,7 +240,7 @@ def ai_rewrite(text):
                     json={
                         "model": model_name,
                         "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 1000,   # увеличен, чтобы хватало на полный пост
+                        "max_tokens": 1000,
                         "temperature": 0.8,
                     },
                     timeout=60,
@@ -256,7 +252,6 @@ def ai_rewrite(text):
                     data = response.json()
                     content = data["choices"][0]["message"]["content"].strip()
 
-                    # Защита от возврата промпта
                     if any(phrase in content.lower() for phrase in [
                         "перепиши новость", "кликбейтный", "только русский",
                         "we need to rewrite", "rewrite the news", "must be in russian"
@@ -265,7 +260,6 @@ def ai_rewrite(text):
                         continue
 
                     if content:
-                        # Обрезаем до последнего законченного предложения
                         content = truncate_to_last_sentence(content)
                         logger.info(f"✅ Успешно использована модель: {model_name} (ключ {key_idx})")
                         return content

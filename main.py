@@ -24,7 +24,6 @@ RSS_URLS = [
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 
-# Собираем все ключи OpenRouter
 OPENROUTER_KEYS = []
 for key_name in ["OPENROUTER_API_KEY", "OPENROUTER_API_KEY_2"]:
     key = os.environ.get(key_name)
@@ -32,7 +31,7 @@ for key_name in ["OPENROUTER_API_KEY", "OPENROUTER_API_KEY_2"]:
         OPENROUTER_KEYS.append(key)
 
 DATA_FILE = "posted_guids.json"
-MAX_ITEMS_PER_RUN = 2   # 👈 2 новости за запуск
+MAX_ITEMS_PER_RUN = 2
 LOG_FILE = "bot.log"
 
 logging.basicConfig(
@@ -355,7 +354,6 @@ def main():
                 logger.info(f"Опубликовано: {title}")
                 continue
 
-        # Fallback
         body_text = article if article and article != title else ""
         if body_text:
             body_text = clean_text(body_text)

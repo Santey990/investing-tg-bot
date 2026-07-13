@@ -32,7 +32,7 @@ for key_name in ["OPENROUTER_API_KEY", "OPENROUTER_API_KEY_2"]:
         OPENROUTER_KEYS.append(key)
 
 DATA_FILE = "posted_guids.json"
-MAX_ITEMS_PER_RUN = 1
+MAX_ITEMS_PER_RUN = 2   # 👈 2 новости за запуск
 LOG_FILE = "bot.log"
 
 logging.basicConfig(
